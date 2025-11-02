@@ -1,0 +1,70 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - "*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            platform: linux
+            ext: ""
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+            platform: linux
+            ext: ""
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            arch: x86_64
+            platform: macos
+            ext: ""
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: aarch64
+            platform: macos
+            ext: ""
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            platform: windows
+            ext: ".exe"
+
+    runs-on: { { matrix.os } }
+
+    step:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build Binary
+        run: cargo build --release --target {{ matrix.target }}
+
+      - name: Prepare Artifact
+        shell: bash
+        run: |
+          mkdir -p output
+          binary_name=$(basename $(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].name'))
+          cp target/${{ matrix.target }}/release/${binary_name}${{ matrix.ext }} \
+            output/${binary_name}-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.arch }}
+          path: output/*
