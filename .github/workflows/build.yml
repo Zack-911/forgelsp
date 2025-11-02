@@ -60,10 +60,8 @@ jobs:
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-            export RUSTFLAGS="-C lto=fat -C codegen-units=1"
-          else
-            export RUSTFLAGS="-C lto=fat -C codegen-units=1"
           fi
+          export RUSTFLAGS="-C lto=fat -C codegen-units=1"
           cargo build --release --target ${{ matrix.target }}
 
       - name: Prepare Artifact
@@ -79,3 +77,25 @@ jobs:
         with:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: output/*
+
+  release:
+    name: Create or Update GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create or Update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release (${{ github.ref_name }})
+          files: dist/**/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
