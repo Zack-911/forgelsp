@@ -20,17 +20,30 @@ pub struct ForgeScriptServer {
 
 impl ForgeScriptServer {
     /// Parses text and updates the diagnostic cache
+    #[tracing::instrument(skip(self, text), fields(uri = %uri, text_len = text.len()))]
     pub async fn process_text(&self, uri: Url, text: String) {
+        let start = std::time::Instant::now();
+        tracing::debug!("📝 Processing text for {}, {} chars", uri, text.len());
+        
         let mgr_arc = self.manager.read().unwrap().clone();
         let parser = ForgeScriptParser::new(mgr_arc, &text);
+        
+        let parse_start = std::time::Instant::now();
         let parsed = parser.parse();
+        tracing::debug!("⏱️  Parsing took {:?}", parse_start.elapsed());
 
+        let cache_start = std::time::Instant::now();
         self.parsed_cache
             .write()
             .unwrap()
             .insert(uri.clone(), parsed.clone());
+        tracing::trace!("⏱️  Cache update took {:?}", cache_start.elapsed());
 
-        analyze_and_publish(self, uri, &text, parsed.diagnostics).await;
+        let diag_start = std::time::Instant::now();
+        analyze_and_publish(self, uri.clone(), &text, parsed.diagnostics).await;
+        tracing::debug!("⏱️  Diagnostics publishing took {:?}", diag_start.elapsed());
+        
+        tracing::info!("✅ Processed text for {} in {:?} total", uri, start.elapsed());
     }
 
     pub fn function_count(&self) -> usize {
@@ -48,16 +61,21 @@ impl ForgeScriptServer {
 impl LanguageServer for ForgeScriptServer {
     #[tracing::instrument(skip(self, params), fields(workspace_folders = ?params.workspace_folders))]
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        tracing::info!("Initializing ForgeScript LSP");
+        let start = std::time::Instant::now();
+        tracing::info!("🚀 Initializing ForgeScript LSP");
+        
         if let Some(folders) = params.workspace_folders {
             let paths = folders
                 .into_iter()
                 .filter_map(|f| f.uri.to_file_path().ok())
                 .collect::<Vec<_>>();
+            tracing::info!("📂 Workspace folders: {:?}", paths);
             *self.workspace_folders.write().unwrap() = paths.clone();
 
             if let Some(urls) = load_forge_config(&paths) {
-                tracing::info!("Loading metadata from forgeconfig.json");
+                tracing::info!("📝 Loading metadata from forgeconfig.json");
+                let mgr_start = std::time::Instant::now();
+                
                 let manager = MetadataManager::new("./.cache", urls)
                     .await
                     .expect("Failed to initialize metadata manager");
@@ -66,10 +84,13 @@ impl LanguageServer for ForgeScriptServer {
                     .await
                     .expect("Failed to load metadata sources");
 
+                tracing::info!("⏱️  Metadata reload took {:?}", mgr_start.elapsed());
                 *self.manager.write().unwrap() = Arc::new(manager);
             }
         }
 
+        tracing::info!("✅ LSP initialization completed in {:?}", start.elapsed());
+        
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -119,7 +140,10 @@ impl LanguageServer for ForgeScriptServer {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        tracing::info!("✅ LSP server initialized callback");
         let count = self.function_count();
+        tracing::info!("📊 Function count: {}", count);
+        
         self.client
             .log_message(
                 MessageType::INFO,
@@ -132,33 +156,40 @@ impl LanguageServer for ForgeScriptServer {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri))]
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri, text_len = params.text_document.text.len()))]
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let start = std::time::Instant::now();
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         
-        tracing::info!("Document opened: {}", uri);
+        tracing::info!("📄 Document opened: {} ({} chars)", uri, text.len());
 
         self.documents
             .write()
             .unwrap()
             .insert(uri.clone(), text.clone());
-        self.process_text(uri, text).await;
+        
+        self.process_text(uri.clone(), text).await;
+        tracing::debug!("⏱️  did_open completed in {:?}", start.elapsed());
     }
 
     #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri))]
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let start = std::time::Instant::now();
+        
         if let Some(change) = params.content_changes.into_iter().next() {
             let uri = params.text_document.uri;
             let text = change.text;
 
-            tracing::debug!("Document changed: {}", uri);
+            tracing::debug!("🔄 Document changed: {} ({} chars)", uri, text.len());
 
             self.documents
                 .write()
                 .unwrap()
                 .insert(uri.clone(), text.clone());
+            
             self.process_text(uri, text).await;
+            tracing::debug!("⏱️  did_change completed in {:?}", start.elapsed());
         }
     }
 
@@ -166,9 +197,14 @@ impl LanguageServer for ForgeScriptServer {
         handle_hover(self, params).await
     }
 
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document_position.text_document.uri, position = ?params.text_document_position.position))]
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let start = std::time::Instant::now();
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        
+        tracing::debug!("🔍 Completion request at {:?}", position);
+        
         let docs = self.documents.read().unwrap();
         let text = docs.get(&uri);
 
@@ -178,6 +214,7 @@ impl LanguageServer for ForgeScriptServer {
             let before_cursor = &line[..position.character as usize];
 
             if before_cursor.ends_with('$') || before_cursor.contains('$') {
+                tracing::trace!("  Generating completion items");
                 let items: Vec<CompletionItem> = self
                     .all_functions()
                     .into_iter()
@@ -191,26 +228,27 @@ impl LanguageServer for ForgeScriptServer {
                     })
                     .collect();
 
+                tracing::info!("✅ Completion returned {} items in {:?}", items.len(), start.elapsed());
                 return Ok(Some(CompletionResponse::Array(items)));
             }
         }
 
+        tracing::debug!("❌ No completion items in {:?}", start.elapsed());
         Ok(None)
     }
 
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document_position_params.text_document.uri, position = ?params.text_document_position_params.position))]
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let start = std::time::Instant::now();
         use regex::Regex;
 
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        tracing::debug!(
-            "[LSP] Signature help requested for {} at {:?}",
-            uri, position
-        );
+        tracing::debug!("✍️  Signature help requested at {:?}", position);
 
         let docs = self.documents.read().unwrap();
         let Some(text) = docs.get(&uri) else {
-            tracing::warn!("[LSP] No text found for URI: {}", uri);
+            tracing::warn!("❌ No text found for URI: {}", uri);
             return Ok(None);
         };
 
@@ -252,7 +290,7 @@ impl LanguageServer for ForgeScriptServer {
         }
 
         let Some(open_index) = last_open_index else {
-            tracing::debug!("[LSP] No unmatched '[' found.");
+            tracing::debug!("❌ No unmatched '[' found");
             return Ok(None);
         };
 
@@ -261,17 +299,17 @@ impl LanguageServer for ForgeScriptServer {
         let func_re = Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").unwrap();
 
         let Some(caps) = func_re.captures(before_bracket) else {
-            tracing::debug!("[LSP] No function pattern found before '['.");
+            tracing::debug!("❌ No function pattern found before '['");
             return Ok(None);
         };
 
         let func_name = caps.get(1).unwrap().as_str();
-        tracing::debug!("Found open function: ${}", func_name);
+        tracing::debug!("  Found open function: ${}", func_name);
 
         // --- Compute active parameter index by scanning forward from '[' to cursor ---
         // Count top-level separators (',' or ';') while ignoring nested brackets and quoted strings.
-        let start = open_index + 1;
-        let sub = &text_up_to_cursor[start..];
+        let start_scan = open_index + 1;
+        let sub = &text_up_to_cursor[start_scan..];
         let mut param_index: u32 = 0;
         let mut local_depth: i32 = 0;
         let mut in_single = false;
@@ -323,7 +361,7 @@ impl LanguageServer for ForgeScriptServer {
             }
         }
 
-        tracing::debug!("[LSP] Active parameter index: {}", param_index);
+        tracing::debug!("  Active parameter index: {}", param_index);
 
         // --- Look up metadata and return signature help with active parameter ---
         let mgr = self.manager.read().unwrap().clone();
@@ -366,6 +404,7 @@ impl LanguageServer for ForgeScriptServer {
                 active_parameter: Some(param_index),
             };
 
+            tracing::info!("✅ Signature help for ${} returned in {:?}", func_name, start.elapsed());
             return Ok(Some(SignatureHelp {
                 signatures: vec![signature],
                 active_signature: Some(0),
@@ -373,22 +412,29 @@ impl LanguageServer for ForgeScriptServer {
             }));
         }
 
-        tracing::warn!("[LSP] No metadata found for {}", func_name);
+        tracing::warn!("❌ No metadata found for ${} (took {:?})", func_name, start.elapsed());
         Ok(None)
     }
 
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri))]
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
+        let start = std::time::Instant::now();
         let uri = params.text_document.uri;
+        tracing::debug!("🎨 Semantic tokens request for {}", uri);
+        
         let docs = self.documents.read().unwrap();
 
         let Some(text) = docs.get(&uri) else {
+            tracing::warn!("❌ No text found for semantic tokens");
             return Ok(None);
         };
+        
         let tokens = extract_semantic_tokens(text);
 
+        tracing::info!("✅ Semantic tokens returned {} tokens in {:?}", tokens.len(), start.elapsed());
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
             data: tokens,

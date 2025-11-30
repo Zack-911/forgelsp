@@ -11,6 +11,9 @@ pub async fn handle_hover(
     server: &ForgeScriptServer,
     params: HoverParams,
 ) -> Result<Option<Hover>> {
+    let start = std::time::Instant::now();
+    tracing::debug!("🔍 Hover request at position {:?}", params.text_document_position_params.position);
+    
     spawn_log(
         server.client.clone(),
         MessageType::INFO,
@@ -33,6 +36,7 @@ pub async fn handle_hover(
         match docs.get(&uri) {
             Some(t) => t.clone(),
             None => {
+                tracing::warn!("❌ No document found in cache for hover");
                 spawn_log(
                     server.client.clone(),
                     MessageType::INFO,
@@ -44,6 +48,7 @@ pub async fn handle_hover(
     };
 
     // Calculate byte offset
+    let offset_start = std::time::Instant::now();
     let mut offset = 0usize;
     for (line_idx, line) in text.split_inclusive('\n').enumerate() {
         if line_idx as u32 == position.line {
@@ -53,17 +58,19 @@ pub async fn handle_hover(
             offset += line.len();
         }
     }
+    tracing::trace!("⏱️  Offset calculation took {:?}", offset_start.elapsed());
 
     if offset >= text.len() {
+        tracing::debug!("❌ Offset out of bounds");
         return Ok(None);
     }
 
     let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '$';
     let bytes = text.as_bytes();
 
-    let mut start = offset;
-    while start > 0 && is_ident_char(bytes[start - 1] as char) {
-        start -= 1;
+    let mut start_pos = offset;
+    while start_pos > 0 && is_ident_char(bytes[start_pos - 1] as char) {
+        start_pos -= 1;
     }
 
     let mut end = offset;
@@ -71,17 +78,22 @@ pub async fn handle_hover(
         end += 1;
     }
 
-    if start >= end {
+    if start_pos >= end {
+        tracing::debug!("❌ No token found at position");
         return Ok(None);
     }
 
-    let token = text[start..end].to_string();
+    let token = text[start_pos..end].to_string();
+    tracing::debug!("  Extracted token: '{}'", token);
 
     // Acquire a read lock on the manager
+    let lookup_start = std::time::Instant::now();
     let mgr = server.manager.read().unwrap(); // RwLockReadGuard<Arc<MetadataManager>>
     let mgr_inner = mgr.clone(); // Arc<MetadataManager>
 
     if let Some(func_ref) = mgr_inner.get(&token) {
+        tracing::debug!("✅ Found metadata for '{}' in {:?}", token, lookup_start.elapsed());
+        
         let func_name = &func_ref.name;
         let func_description = &func_ref.description;
         let func_args = &func_ref.args;
@@ -89,6 +101,7 @@ pub async fn handle_hover(
         let func_examples = &func_ref.examples;
         let func_brackets = &func_ref.brackets;
 
+        let md_start = std::time::Instant::now();
         let mut md = String::new();
         let args_str = func_args
             .as_ref()
@@ -141,6 +154,9 @@ pub async fn handle_hover(
                 }
             }
         }
+        
+        tracing::trace!("⏱️  Markdown generation took {:?}", md_start.elapsed());
+        tracing::info!("✅ Hover for '{}' completed in {:?}", token, start.elapsed());
 
         return Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
@@ -151,5 +167,6 @@ pub async fn handle_hover(
         }));
     }
 
+    tracing::debug!("❌ No metadata found for '{}' (took {:?})", token, start.elapsed());
     return Ok(None);
 }

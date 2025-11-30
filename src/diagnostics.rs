@@ -3,14 +3,17 @@ use tower_lsp::lsp_types::*;
 
 /// Publish diagnostics using already-parsed results
 /// Publish diagnostics using already-parsed results
-#[tracing::instrument(skip(server, text, diagnostics_data), fields(uri = %uri))]
+#[tracing::instrument(skip(server, text, diagnostics_data), fields(uri = %uri, diag_count = diagnostics_data.len()))]
 pub async fn analyze_and_publish(
     server: &ForgeScriptServer,
     uri: Url,
     text: &str,
     diagnostics_data: Vec<crate::parser::Diagnostic>,
 ) {
-    tracing::debug!("Publishing {} diagnostics for {}", diagnostics_data.len(), uri);
+    let start = std::time::Instant::now();
+    tracing::debug!("📊 Publishing {} diagnostics for {}", diagnostics_data.len(), uri);
+    
+    let convert_start = std::time::Instant::now();
     let diagnostics: Vec<Diagnostic> = diagnostics_data
         .into_iter()
         .map(|d| {
@@ -36,9 +39,14 @@ pub async fn analyze_and_publish(
             }
         })
         .collect();
+    tracing::trace!("⏱️  Diagnostic conversion took {:?}", convert_start.elapsed());
 
+    let publish_start = std::time::Instant::now();
     let _ = server
         .client
-        .publish_diagnostics(uri, diagnostics, None)
+        .publish_diagnostics(uri.clone(), diagnostics, None)
         .await;
+    tracing::debug!("⏱️  Diagnostic publishing took {:?}", publish_start.elapsed());
+    
+    tracing::info!("✅ Diagnostics published in {:?} total", start.elapsed());
 }
