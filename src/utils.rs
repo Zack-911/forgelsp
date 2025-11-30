@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tower_lsp::Client;
 use tower_lsp::lsp_types::MessageType;
 
@@ -16,10 +16,11 @@ struct ForgeConfig {
 }
 
 /// Looks in the workspace folders for forgeconfig.json
+#[tracing::instrument(skip(workspace_folders))]
 pub fn load_forge_config(workspace_folders: &[PathBuf]) -> Option<Vec<String>> {
     for folder in workspace_folders {
         let path = folder.join("forgeconfig.json");
-        eprintln!("Looking for forgeconfig.json in: {:?}", path);
+        tracing::debug!("Looking for forgeconfig.json in: {:?}", path);
         if path.exists() {
             if let Ok(data) = fs::read_to_string(&path) {
                 if let Ok(config) = serde_json::from_str::<ForgeConfig>(&data) {

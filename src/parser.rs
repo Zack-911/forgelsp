@@ -79,7 +79,9 @@ impl<'a> ForgeScriptParser<'a> {
         Self { manager, code }
     }
 
+    #[tracing::instrument(skip(self))]
     pub fn parse(&self) -> ParseResult {
+        let start = std::time::Instant::now();
         let mut tokens: Vec<Token> = Vec::new();
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let mut functions: Vec<ParsedFunction> = Vec::new();
@@ -236,6 +238,13 @@ impl<'a> ForgeScriptParser<'a> {
                 start: last_idx,
                 end: self.code.len(),
             });
+        }
+
+        let duration = start.elapsed();
+        if duration.as_millis() > 100 {
+            tracing::warn!("Parsing took {:?} for {} chars", duration, self.code.len());
+        } else {
+            tracing::debug!("Parsing took {:?} for {} chars", duration, self.code.len());
         }
 
         ParseResult {

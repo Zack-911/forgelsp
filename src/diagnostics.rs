@@ -2,12 +2,15 @@ use crate::server::ForgeScriptServer;
 use tower_lsp::lsp_types::*;
 
 /// Publish diagnostics using already-parsed results
+/// Publish diagnostics using already-parsed results
+#[tracing::instrument(skip(server, text, diagnostics_data), fields(uri = %uri))]
 pub async fn analyze_and_publish(
     server: &ForgeScriptServer,
     uri: Url,
     text: &str,
     diagnostics_data: Vec<crate::parser::Diagnostic>,
 ) {
+    tracing::debug!("Publishing {} diagnostics for {}", diagnostics_data.len(), uri);
     let diagnostics: Vec<Diagnostic> = diagnostics_data
         .into_iter()
         .map(|d| {

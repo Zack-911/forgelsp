@@ -77,22 +77,26 @@ impl Fetcher {
         self.cache_dir.join(format!("{safe}.json"))
     }
 
+    #[tracing::instrument(skip(self), fields(url = %url))]
     pub async fn fetch_or_cache(&self, url: &str) -> Result<Functions> {
         let path = self.cache_path(url);
         match self.http.get(url).send().await {
             Ok(resp) => {
+                tracing::debug!("Successfully fetched metadata from {}", url);
                 let body = resp.text().await?;
                 fs::write(&path, &body)?;
                 let parsed: Functions = serde_json::from_str(&body)?;
                 Ok(parsed)
             }
             Err(err) => {
-                eprintln!("⚠️ Fetch failed for {url}: {err}. Using cached file if exists...");
+                tracing::warn!("Fetch failed for {url}: {err}. Using cached file if exists...");
                 if path.exists() {
+                    tracing::info!("Loading cached metadata from {:?}", path);
                     let data = fs::read_to_string(&path)?;
                     let parsed: Functions = serde_json::from_str(&data)?;
                     Ok(parsed)
                 } else {
+                    tracing::error!("No cache found for {url}");
                     Err(anyhow!("No cache found for {url}"))
                 }
             }
@@ -213,15 +217,21 @@ impl MetadataManager {
         })
     }
 
+    #[tracing::instrument(skip(self))]
     pub async fn load_all(&self) -> Result<()> {
+        let start = std::time::Instant::now();
+        tracing::info!("Starting to load all metadata sources...");
+        
         let all_funcs = self.fetcher.fetch_all(&self.fetch_urls).await?;
         let mut trie = self.trie.write().unwrap();
 
+        let count = all_funcs.len();
         for func in all_funcs {
             let arc_func = Arc::new(func);
             trie.insert(&arc_func.name, arc_func.clone());
         }
 
+        tracing::info!("Loaded {} functions in {:?}", count, start.elapsed());
         Ok(())
     }
 

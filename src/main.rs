@@ -9,7 +9,6 @@ mod utils;
 use metadata::MetadataManager;
 use server::ForgeScriptServer;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::io::{stdin, stdout};
 use tower_lsp::{LspService, Server};
@@ -17,6 +16,16 @@ use utils::load_forge_config;
 
 #[tokio::main]
 async fn main() {
+    // Initialize logging
+    let file_appender = tracing_appender::rolling::never(".", "forgelsp.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive(tracing::Level::INFO.into()))
+        .with_ansi(false) // Disable ANSI colors for file logging
+        .init();
+
+    tracing::info!("Starting ForgeLSP server...");
     // Try to get workspace folders from environment or fallback
     let workspace_folders = vec![std::env::current_dir().unwrap()];
 

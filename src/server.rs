@@ -4,7 +4,6 @@ use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens;
 use crate::utils::load_forge_config;
-use regex::Regex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -47,7 +46,9 @@ impl ForgeScriptServer {
 
 #[async_trait]
 impl LanguageServer for ForgeScriptServer {
+    #[tracing::instrument(skip(self, params), fields(workspace_folders = ?params.workspace_folders))]
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        tracing::info!("Initializing ForgeScript LSP");
         if let Some(folders) = params.workspace_folders {
             let paths = folders
                 .into_iter()
@@ -56,6 +57,7 @@ impl LanguageServer for ForgeScriptServer {
             *self.workspace_folders.write().unwrap() = paths.clone();
 
             if let Some(urls) = load_forge_config(&paths) {
+                tracing::info!("Loading metadata from forgeconfig.json");
                 let manager = MetadataManager::new("./.cache", urls)
                     .await
                     .expect("Failed to initialize metadata manager");
@@ -130,9 +132,12 @@ impl LanguageServer for ForgeScriptServer {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri))]
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
+        
+        tracing::info!("Document opened: {}", uri);
 
         self.documents
             .write()
@@ -141,10 +146,13 @@ impl LanguageServer for ForgeScriptServer {
         self.process_text(uri, text).await;
     }
 
+    #[tracing::instrument(skip(self, params), fields(uri = %params.text_document.uri))]
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         if let Some(change) = params.content_changes.into_iter().next() {
             let uri = params.text_document.uri;
             let text = change.text;
+
+            tracing::debug!("Document changed: {}", uri);
 
             self.documents
                 .write()
@@ -195,14 +203,14 @@ impl LanguageServer for ForgeScriptServer {
 
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
-        eprintln!(
+        tracing::debug!(
             "[LSP] Signature help requested for {} at {:?}",
             uri, position
         );
 
         let docs = self.documents.read().unwrap();
         let Some(text) = docs.get(&uri) else {
-            eprintln!("[LSP] No text found for URI: {}", uri);
+            tracing::warn!("[LSP] No text found for URI: {}", uri);
             return Ok(None);
         };
 
@@ -244,7 +252,7 @@ impl LanguageServer for ForgeScriptServer {
         }
 
         let Some(open_index) = last_open_index else {
-            eprintln!("[LSP] No unmatched '[' found.");
+            tracing::debug!("[LSP] No unmatched '[' found.");
             return Ok(None);
         };
 
@@ -253,12 +261,12 @@ impl LanguageServer for ForgeScriptServer {
         let func_re = Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").unwrap();
 
         let Some(caps) = func_re.captures(before_bracket) else {
-            eprintln!("[LSP] No function pattern found before '['.");
+            tracing::debug!("[LSP] No function pattern found before '['.");
             return Ok(None);
         };
 
         let func_name = caps.get(1).unwrap().as_str();
-        eprintln!("🔍 Found open function: ${}", func_name);
+        tracing::debug!("Found open function: ${}", func_name);
 
         // --- Compute active parameter index by scanning forward from '[' to cursor ---
         // Count top-level separators (',' or ';') while ignoring nested brackets and quoted strings.
@@ -315,7 +323,7 @@ impl LanguageServer for ForgeScriptServer {
             }
         }
 
-        eprintln!("[LSP] Active parameter index: {}", param_index);
+        tracing::debug!("[LSP] Active parameter index: {}", param_index);
 
         // --- Look up metadata and return signature help with active parameter ---
         let mgr = self.manager.read().unwrap().clone();
@@ -365,7 +373,7 @@ impl LanguageServer for ForgeScriptServer {
             }));
         }
 
-        eprintln!("[LSP] No metadata found for {}", func_name);
+        tracing::warn!("[LSP] No metadata found for {}", func_name);
         Ok(None)
     }
 

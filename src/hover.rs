@@ -5,6 +5,8 @@ use crate::server::ForgeScriptServer;
 use crate::utils::spawn_log;
 
 /// Handles hover requests
+/// Handles hover requests
+#[tracing::instrument(skip(server, params), fields(position = ?params.text_document_position_params.position))]
 pub async fn handle_hover(
     server: &ForgeScriptServer,
     params: HoverParams,
