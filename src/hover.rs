@@ -97,7 +97,7 @@ pub async fn handle_hover(
                         name
                     })
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join("; ")
             })
             .unwrap_or_default();
 
