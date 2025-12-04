@@ -63,9 +63,7 @@ pub struct Fetcher {
 impl Fetcher {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         let dir = cache_dir.into();
-        tracing::debug!("📁 Initializing Fetcher with cache directory: {:?}", dir);
         if !dir.exists() {
-            tracing::info!("📁 Creating cache directory: {:?}", dir);
             fs::create_dir_all(&dir).unwrap();
         }
         Self {
@@ -79,47 +77,22 @@ impl Fetcher {
         self.cache_dir.join(format!("{safe}.json"))
     }
 
-    #[tracing::instrument(skip(self), fields(url = %url))]
     pub async fn fetch_or_cache(&self, url: &str) -> Result<Functions> {
-        let start = std::time::Instant::now();
         let path = self.cache_path(url);
-        tracing::debug!("🔍 Attempting to fetch or load from cache: {}", url);
-        tracing::debug!("📂 Cache path: {:?}", path);
-        
+
         match self.http.get(url).send().await {
             Ok(resp) => {
-                let fetch_time = start.elapsed();
-                tracing::info!("✅ Successfully fetched metadata from {} in {:?}", url, fetch_time);
-                
-                let body_start = std::time::Instant::now();
                 let body = resp.text().await?;
-                tracing::debug!("⏱️  Response body read in {:?}, size: {} bytes", body_start.elapsed(), body.len());
-                
-                let write_start = std::time::Instant::now();
                 fs::write(&path, &body)?;
-                tracing::debug!("⏱️  Cache write took {:?}", write_start.elapsed());
-                
-                let parse_start = std::time::Instant::now();
                 let parsed: Functions = serde_json::from_str(&body)?;
-                tracing::info!("⏱️  Parsed {} functions in {:?}", parsed.len(), parse_start.elapsed());
-                tracing::info!("⏱️  Total fetch_or_cache took {:?}", start.elapsed());
                 Ok(parsed)
             }
-            Err(err) => {
-                tracing::warn!("⚠️  Fetch failed for {url}: {err}. Attempting to use cached file...");
+            Err(_err) => {
                 if path.exists() {
-                    tracing::info!("💾 Cache hit! Loading cached metadata from {:?}", path);
-                    let read_start = std::time::Instant::now();
                     let data = fs::read_to_string(&path)?;
-                    tracing::debug!("⏱️  Cache read took {:?}, size: {} bytes", read_start.elapsed(), data.len());
-                    
-                    let parse_start = std::time::Instant::now();
                     let parsed: Functions = serde_json::from_str(&data)?;
-                    tracing::info!("⏱️  Parsed {} cached functions in {:?}", parsed.len(), parse_start.elapsed());
-                    tracing::info!("⏱️  Total cache load took {:?}", start.elapsed());
                     Ok(parsed)
                 } else {
-                    tracing::error!("❌ No cache found for {url}");
                     Err(anyhow!("No cache found for {url}"))
                 }
             }
@@ -127,35 +100,26 @@ impl Fetcher {
     }
 
     pub async fn fetch_all(&self, urls: &[String]) -> Result<Vec<Function>> {
-        let start = std::time::Instant::now();
-        tracing::info!("🌐 Starting to fetch all metadata from {} URLs", urls.len());
-        
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
             let this = self.clone();
             async move { this.fetch_or_cache(&u).await }
         });
         let results = future::join_all(tasks).await;
-        
+
         let mut out = Vec::new();
-        let mut success_count = 0;
         let mut fail_count = 0;
-        
+
         for r in results {
             if let Ok(funcs) = r {
                 out.extend(funcs);
-                success_count += 1;
             } else {
                 fail_count += 1;
             }
         }
-        
-        tracing::info!("✅ Fetched {} total functions from {}/{} URLs in {:?}", 
-            out.len(), success_count, urls.len(), start.elapsed());
-        if fail_count > 0 {
-            tracing::warn!("⚠️  {} URLs failed to fetch", fail_count);
-        }
-        
+
+        if fail_count > 0 {}
+
         Ok(out)
     }
 }
@@ -190,16 +154,12 @@ impl TrieNode {
 
 impl FunctionTrie {
     pub fn insert(&mut self, key: &str, func: Arc<Function>) {
-        tracing::trace!("🔤 Inserting function '{}' into trie", key);
         let mut node = &mut self.root;
         for c in key.to_lowercase().chars() {
             node = node.children.entry(c).or_default();
         }
         if node.value.is_none() {
             self.size += 1;
-            tracing::trace!("✅ New function added, trie size now: {}", self.size);
-        } else {
-            tracing::trace!("🔄 Updating existing function in trie");
         }
         node.value = Some(func);
     }
@@ -209,9 +169,6 @@ impl FunctionTrie {
         out
     }
     pub fn get(&self, text: &str) -> Option<(String, Arc<Function>)> {
-        let start = std::time::Instant::now();
-        tracing::trace!("🔍 Searching trie for: '{}'", text);
-        
         let chars: Vec<char> = text.to_lowercase().chars().collect();
         let mut best_match: Option<(String, Arc<Function>)> = None;
 
@@ -228,17 +185,11 @@ impl FunctionTrie {
                             best_match = Some((current_match.clone(), val.clone()));
                         }
                     }
-                    None => break,
+                    _ => break,
                 }
             }
         }
 
-        if let Some((ref _matched, ref func)) = best_match {
-            tracing::trace!("✅ Found match: '{}' -> '{}' in {:?}", text, func.name, start.elapsed());
-        } else {
-            tracing::trace!("❌ No match found for '{}' in {:?}", text, start.elapsed());
-        }
-        
         best_match
     }
 
@@ -260,14 +211,9 @@ pub struct MetadataManager {
 
 impl MetadataManager {
     pub async fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
-        let start = std::time::Instant::now();
-        tracing::info!("🧠 Creating MetadataManager with {} URLs", fetch_urls.len());
-        
         let fetcher = Fetcher::new(cache_dir);
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
 
-        tracing::debug!("⏱️  MetadataManager creation took {:?}", start.elapsed());
-        
         Ok(Self {
             fetcher,
             fetch_urls,
@@ -275,42 +221,20 @@ impl MetadataManager {
         })
     }
 
-    #[tracing::instrument(skip(self))]
     pub async fn load_all(&self) -> Result<()> {
-        let start = std::time::Instant::now();
-        tracing::info!("📥 Starting to load all metadata sources...");
-        
-        let fetch_start = std::time::Instant::now();
         let all_funcs = self.fetcher.fetch_all(&self.fetch_urls).await?;
-        tracing::info!("⏱️  Fetching all metadata took {:?}", fetch_start.elapsed());
-        
-        let trie_start = std::time::Instant::now();
-        let mut trie = self.trie.write().unwrap();
-        tracing::debug!("🔒 Acquired write lock on trie in {:?}", trie_start.elapsed());
 
-        let count = all_funcs.len();
-        tracing::info!("📝 Inserting {} functions into trie...", count);
-        
-        let insert_start = std::time::Instant::now();
+        let mut trie = self.trie.write().unwrap();
         for func in all_funcs {
             let arc_func = Arc::new(func);
             trie.insert(&arc_func.name, arc_func.clone());
         }
-        tracing::info!("⏱️  Trie insertion took {:?}", insert_start.elapsed());
-
-        tracing::info!("✅ Loaded {} functions in {:?} total", count, start.elapsed());
         Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
-        let start = std::time::Instant::now();
-        tracing::trace!("🔍 MetadataManager::get called for: '{}'", name);
-        
         let trie = self.trie.read().unwrap();
-        let result = trie.get(name).map(|(_, func)| func);
-        
-        tracing::trace!("⏱️  MetadataManager::get took {:?}", start.elapsed());
-        result
+        trie.get(name).map(|(_, func)| func)
     }
 
     pub fn function_count(&self) -> usize {

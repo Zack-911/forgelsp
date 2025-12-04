@@ -1,52 +1,42 @@
+use crate::parser::Diagnostic as ParseDiagnostic;
 use crate::server::ForgeScriptServer;
-use tower_lsp::lsp_types::*;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
 
-/// Publish diagnostics using already-parsed results
-/// Publish diagnostics using already-parsed results
-#[tracing::instrument(skip(server, text, diagnostics_data), fields(uri = %uri, diag_count = diagnostics_data.len()))]
-pub async fn analyze_and_publish(
+fn offset_to_position(text: &str, offset: usize) -> Position {
+    let line = text[..offset].matches('\n').count() as u32;
+    let char_in_line = offset - text[..offset].rfind('\n').unwrap_or(0);
+    Position {
+        line,
+        character: char_in_line as u32,
+    }
+}
+
+pub async fn publish_diagnostics(
     server: &ForgeScriptServer,
-    uri: Url,
+    uri: &Url,
     text: &str,
-    diagnostics_data: Vec<crate::parser::Diagnostic>,
+    diagnostics_data: &[ParseDiagnostic],
 ) {
-    let start = std::time::Instant::now();
-    tracing::debug!("📊 Publishing {} diagnostics for {}", diagnostics_data.len(), uri);
-    
-    let convert_start = std::time::Instant::now();
     let diagnostics: Vec<Diagnostic> = diagnostics_data
-        .into_iter()
+        .iter()
         .map(|d| {
-            let start_line = text[..d.start].matches('\n').count() as u32;
-            let start_char = (d.start - text[..d.start].rfind('\n').unwrap_or(0)) as u32;
-            let end_line = text[..d.end].matches('\n').count() as u32;
-            let end_char = (d.end - text[..d.end].rfind('\n').unwrap_or(0)) as u32;
+            let start_pos = offset_to_position(text, d.start);
+            let end_pos = offset_to_position(text, d.end);
 
             Diagnostic {
                 range: Range {
-                    start: Position {
-                        line: start_line,
-                        character: start_char,
-                    },
-                    end: Position {
-                        line: end_line,
-                        character: end_char,
-                    },
+                    start: start_pos,
+                    end: end_pos,
                 },
-                severity: Some(DiagnosticSeverity::WARNING),
-                message: d.message,
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: d.message.clone(),
                 ..Default::default()
             }
         })
         .collect();
-    tracing::trace!("⏱️  Diagnostic conversion took {:?}", convert_start.elapsed());
 
-    let publish_start = std::time::Instant::now();
-    let _ = server
+    server
         .client
         .publish_diagnostics(uri.clone(), diagnostics, None)
         .await;
-    tracing::debug!("⏱️  Diagnostic publishing took {:?}", publish_start.elapsed());
-    
-    tracing::info!("✅ Diagnostics published in {:?} total", start.elapsed());
 }

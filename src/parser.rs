@@ -76,28 +76,19 @@ pub struct ForgeScriptParser<'a> {
 
 impl<'a> ForgeScriptParser<'a> {
     pub fn new(manager: Arc<MetadataManager>, code: &'a str) -> Self {
-        tracing::trace!("📝 Creating ForgeScriptParser for {} chars of code", code.len());
         Self { manager, code }
     }
 
-    #[tracing::instrument(skip(self), fields(code_len = self.code.len()))]
     pub fn parse(&self) -> ParseResult {
-        let start = std::time::Instant::now();
-        tracing::debug!("🔍 Starting parse for {} chars", self.code.len());
-        
         let mut tokens: Vec<Token> = Vec::new();
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let mut functions: Vec<ParsedFunction> = Vec::new();
 
         let mut iter = self.code.char_indices().peekable();
         let mut last_idx = 0;
-        let mut function_count = 0;
 
         while let Some((idx, c)) = iter.next() {
             if c == '$' {
-                function_count += 1;
-                tracing::trace!("🔎 Found potential function at position {}", idx);
-                
                 // push previous text as a token
                 if last_idx < idx {
                     tokens.push(Token {
@@ -116,11 +107,9 @@ impl<'a> ForgeScriptParser<'a> {
                     if next_c == '!' {
                         silent = true;
                         iter.next();
-                        tracing::trace!("  Silent modifier detected");
                     } else if next_c == '#' {
                         negated = true;
                         iter.next();
-                        tracing::trace!("  Negated modifier detected");
                     }
                 }
 
@@ -138,15 +127,12 @@ impl<'a> ForgeScriptParser<'a> {
                 }
                 let name = name_chars.iter().collect::<String>();
                 last_idx = name_end;
-                tracing::trace!("  Function name: '{}'", name);
 
                 // parse args if any
                 let mut args_text: Option<&str> = None;
                 if let Some(&(i, '[')) = iter.peek() {
-                    tracing::trace!("  Found opening bracket at position {}", i);
                     if let Some(end_idx) = find_matching_bracket(self.code, i) {
                         args_text = Some(&self.code[i + 1..end_idx]);
-                        tracing::trace!("  Args text: '{}'", args_text.unwrap());
                         while let Some(&(j, _)) = iter.peek() {
                             if j <= end_idx {
                                 iter.next();
@@ -156,7 +142,6 @@ impl<'a> ForgeScriptParser<'a> {
                         }
                         last_idx = end_idx + 1;
                     } else {
-                        tracing::warn!("⚠️  Unclosed bracket for function ${}", name);
                         diagnostics.push(Diagnostic {
                             message: format!("Unclosed '[' for function `${}`", name),
                             start,
@@ -166,19 +151,14 @@ impl<'a> ForgeScriptParser<'a> {
                     }
                 }
 
-                let lookup_start = std::time::Instant::now();
                 if let Some(meta) = self.manager.get(&format!("${}", name)) {
-                    tracing::trace!("✅ Found metadata for ${} in {:?}", name, lookup_start.elapsed());
-                    
                     let (min_args, max_args) = compute_arg_counts(&meta);
                     let mut parsed_args: Option<Vec<SmallVec<[ParsedArg; 8]>>> = None;
 
                     if let Some(inner) = args_text {
                         if meta.brackets.unwrap_or(false) {
-                            let arg_parse_start = std::time::Instant::now();
                             match parse_nested_args(inner, self.manager.clone()) {
                                 Ok(args_vec) => {
-                                    tracing::trace!("  Parsed {} args in {:?}", args_vec.len(), arg_parse_start.elapsed());
                                     parsed_args = Some(args_vec.clone());
                                     validate_arg_count(
                                         &name,
@@ -195,7 +175,6 @@ impl<'a> ForgeScriptParser<'a> {
                                     );
                                 }
                                 Err(_) => {
-                                    tracing::warn!("⚠️  Failed to parse args for ${}", name);
                                     diagnostics.push(Diagnostic {
                                         message: format!("Failed to parse args for `${}`", name),
                                         start,
@@ -204,7 +183,6 @@ impl<'a> ForgeScriptParser<'a> {
                                 }
                             }
                         } else {
-                            tracing::warn!("⚠️  ${} does not accept brackets", name);
                             diagnostics.push(Diagnostic {
                                 message: format!("${} does not accept brackets", name),
                                 start,
@@ -212,7 +190,6 @@ impl<'a> ForgeScriptParser<'a> {
                             });
                         }
                     } else if meta.brackets.unwrap_or(false) {
-                        tracing::warn!("⚠️  ${} expects brackets but none found", name);
                         diagnostics.push(Diagnostic {
                             message: format!("${} expects brackets `[...]`", name),
                             start,
@@ -238,7 +215,6 @@ impl<'a> ForgeScriptParser<'a> {
                         meta,
                     });
                 } else {
-                    tracing::warn!("❌ Unknown function: ${} (lookup took {:?})", name, lookup_start.elapsed());
                     diagnostics.push(Diagnostic {
                         message: format!("Unknown function `${}`", name),
                         start,
@@ -262,15 +238,6 @@ impl<'a> ForgeScriptParser<'a> {
                 start: last_idx,
                 end: self.code.len(),
             });
-        }
-
-        let duration = start.elapsed();
-        if duration.as_millis() > 100 {
-            tracing::warn!("⚠️  Parsing took {:?} for {} chars ({} functions, {} diagnostics)", 
-                duration, self.code.len(), functions.len(), diagnostics.len());
-        } else {
-            tracing::debug!("✅ Parsing completed in {:?} for {} chars ({} functions, {} diagnostics)", 
-                duration, self.code.len(), functions.len(), diagnostics.len());
         }
 
         ParseResult {
@@ -320,9 +287,6 @@ fn parse_nested_args(
     input: &str,
     manager: Arc<MetadataManager>,
 ) -> Result<Vec<SmallVec<[ParsedArg; 8]>>, nom::Err<()>> {
-    tracing::trace!("🔧 Parsing nested args from: '{}'", input);
-    let start = std::time::Instant::now();
-    
     let mut args = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
@@ -363,7 +327,6 @@ fn parse_nested_args(
         }
     }
 
-    tracing::trace!("  Parsed {} args in {:?}", args.len(), start.elapsed());
     Ok(args)
 }
 

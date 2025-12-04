@@ -2,9 +2,7 @@ use regex::Regex;
 use tower_lsp::lsp_types::{Position, SemanticToken};
 
 /// Extract tokens using regex-based rules inside code blocks
-#[tracing::instrument(skip(source))]
 pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
-    let start = std::time::Instant::now();
     let mut tokens = Vec::new();
     let code_block_re = Regex::new(r"code:\s*`{1,3}([\s\S]*?)`{1,3}").unwrap();
     let func_re = Regex::new(
@@ -65,7 +63,6 @@ pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
         }
     }
 
-    tracing::debug!("Extracted {} semantic tokens in {:?}", tokens.len(), start.elapsed());
     tokens
 }
 
