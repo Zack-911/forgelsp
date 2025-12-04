@@ -177,6 +177,12 @@ strip = true       # Remove debug symbols
 
 ---
 
+## Contributors
+
+- **Striatp** ([@striatp](https://github.com/striatp)): Helping me with the github build scripts to build the lsp for all devices
+
+---
+
 ## 📄 License
 
-MIT License - See [LICENSE](LICENSE) for details.
+GPL-3 License - See [LICENSE](LICENSE) for details.
