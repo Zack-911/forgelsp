@@ -156,7 +156,8 @@ impl<'a> ForgeScriptParser<'a> {
                     let mut parsed_args: Option<Vec<SmallVec<[ParsedArg; 8]>>> = None;
 
                     if let Some(inner) = args_text {
-                        if meta.brackets.unwrap_or(false) {
+                        // brackets: true -> required, brackets: false -> optional, brackets: None -> not allowed
+                        if meta.brackets.is_some() {
                             match parse_nested_args(inner, self.manager.clone()) {
                                 Ok(args_vec) => {
                                     parsed_args = Some(args_vec.clone());
@@ -183,13 +184,16 @@ impl<'a> ForgeScriptParser<'a> {
                                 }
                             }
                         } else {
+                            // brackets: None means no brackets allowed
                             diagnostics.push(Diagnostic {
                                 message: format!("${} does not accept brackets", name),
                                 start,
                                 end: last_idx,
                             });
                         }
-                    } else if meta.brackets.unwrap_or(false) {
+                    } else if meta.brackets == Some(true) {
+                        // Only error if brackets are required (Some(true))
+                        // brackets: false (optional) or None (no brackets) don't need brackets
                         diagnostics.push(Diagnostic {
                             message: format!("${} expects brackets `[...]`", name),
                             start,
