@@ -91,7 +91,7 @@ fn resolve_github_shorthand(input: String) -> String {
     let file_path = if parts.len() > 2 {
         parts[2..].join("/")
     } else {
-        "forge.json".to_string()
+        "metadata/functions.json".to_string()
     };
 
     format!(
