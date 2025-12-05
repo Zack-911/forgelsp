@@ -16,6 +16,8 @@ pub struct Diagnostic {
 pub enum TokenKind {
     Text,
     FunctionName,
+    Escaped,
+    JavaScript,
     Unknown,
 }
 
@@ -69,6 +71,68 @@ pub enum ParsedArg {
     Function { func: Box<ParsedFunction> },
 }
 
+/// Check if a character at the given byte index is escaped by a backslash.
+/// Counts consecutive backslashes before the position. If odd, the character is escaped.
+fn is_escaped(code: &str, byte_idx: usize) -> bool {
+    if byte_idx == 0 {
+        return false;
+    }
+
+    let bytes = code.as_bytes();
+    let mut backslash_count = 0;
+    let mut pos = byte_idx;
+
+    while pos > 0 {
+        pos -= 1;
+        if bytes[pos] == b'\\' {
+            backslash_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Odd number of backslashes means the character is escaped
+    backslash_count % 2 == 1
+}
+
+/// Process escape sequences in a string, returning the unescaped version.
+/// Handles: \$ -> $, \[ -> [, \] -> ], \; -> ;, \\ -> \
+#[allow(dead_code)]
+pub fn unescape_string(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    '$' | '[' | ']' | ';' | '\\' => {
+                        result.push(next);
+                        chars.next();
+                    }
+                    _ => {
+                        // Keep the backslash if it's not escaping a special char
+                        result.push(c);
+                    }
+                }
+            } else {
+                // Trailing backslash
+                result.push(c);
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Check if the function name is an escape function ($esc or $escape)
+fn is_escape_function(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "esc" || lower == "escape"
+}
+
 pub struct ForgeScriptParser<'a> {
     manager: Arc<MetadataManager>,
     code: &'a str,
@@ -88,7 +152,35 @@ impl<'a> ForgeScriptParser<'a> {
         let mut last_idx = 0;
 
         while let Some((idx, c)) = iter.next() {
-            if c == '$' {
+            // Handle backslash escaping
+            if c == '\\' {
+                if let Some(&(_next_idx, next_c)) = iter.peek() {
+                    match next_c {
+                        '$' | '[' | ']' | ';' | '\\' => {
+                            // Push text before the backslash
+                            if last_idx < idx {
+                                tokens.push(Token {
+                                    kind: TokenKind::Text,
+                                    text: Box::leak(
+                                        self.code[last_idx..idx].to_string().into_boxed_str(),
+                                    ),
+                                    start: last_idx,
+                                    end: idx,
+                                });
+                            }
+                            // Skip the backslash, the escaped char will be handled as regular text
+                            iter.next(); // consume the escaped character
+                            last_idx = idx; // Start from backslash so \$ becomes part of text
+                            continue;
+                        }
+                        _ => {
+                            // Not a special escape, treat backslash as regular text
+                        }
+                    }
+                }
+            }
+
+            if c == '$' && !is_escaped(self.code, idx) {
                 // push previous text as a token
                 if last_idx < idx {
                     tokens.push(Token {
@@ -100,6 +192,42 @@ impl<'a> ForgeScriptParser<'a> {
                 }
 
                 let start = idx;
+
+                // Check for JavaScript expression ${...}
+                if let Some(&(brace_idx, '{')) = iter.peek() {
+                    if let Some(end_idx) = find_matching_brace(self.code, brace_idx) {
+                        // Everything inside is JavaScript code
+                        let js_content = &self.code[brace_idx + 1..end_idx];
+
+                        // Advance iterator past the closing brace
+                        while let Some(&(j, _)) = iter.peek() {
+                            if j <= end_idx {
+                                iter.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        last_idx = end_idx + 1;
+
+                        // Create a JavaScript token
+                        tokens.push(Token {
+                            kind: TokenKind::JavaScript,
+                            text: Box::leak(js_content.to_string().into_boxed_str()),
+                            start,
+                            end: last_idx,
+                        });
+                        continue;
+                    } else {
+                        diagnostics.push(Diagnostic {
+                            message: "Unclosed '{' for JavaScript expression `${...}`".to_string(),
+                            start,
+                            end: self.code.len(),
+                        });
+                        last_idx = self.code.len();
+                        continue;
+                    }
+                }
+
                 let mut silent = false;
                 let mut negated = false;
 
@@ -127,6 +255,63 @@ impl<'a> ForgeScriptParser<'a> {
                 }
                 let name = name_chars.iter().collect::<String>();
                 last_idx = name_end;
+
+                // Check if this is an escape function ($esc or $escape)
+                if is_escape_function(&name) {
+                    // Handle $esc[...] and $escape[...]
+                    if let Some(&(bracket_idx, '[')) = iter.peek() {
+                        if let Some(end_idx) = find_matching_bracket_raw(self.code, bracket_idx) {
+                            // Everything inside is treated as literal escaped text
+                            let escaped_content = &self.code[bracket_idx + 1..end_idx];
+
+                            // Advance iterator past the closing bracket
+                            while let Some(&(j, _)) = iter.peek() {
+                                if j <= end_idx {
+                                    iter.next();
+                                } else {
+                                    break;
+                                }
+                            }
+                            last_idx = end_idx + 1;
+
+                            // Create an escaped text token
+                            tokens.push(Token {
+                                kind: TokenKind::Escaped,
+                                text: Box::leak(escaped_content.to_string().into_boxed_str()),
+                                start,
+                                end: last_idx,
+                            });
+                            continue;
+                        } else {
+                            diagnostics.push(Diagnostic {
+                                message: format!("Unclosed '[' for escape function `${}`", name),
+                                start,
+                                end: self.code.len(),
+                            });
+                            last_idx = self.code.len();
+                            continue;
+                        }
+                    } else {
+                        // $esc or $escape without brackets - treat as unknown function
+                        diagnostics.push(Diagnostic {
+                            message: format!(
+                                "${} expects brackets `[...]` containing content to escape",
+                                name
+                            ),
+                            start,
+                            end: last_idx,
+                        });
+                        tokens.push(Token {
+                            kind: TokenKind::Unknown,
+                            text: Box::leak(
+                                self.code[start..last_idx].to_string().into_boxed_str(),
+                            ),
+                            start,
+                            end: last_idx,
+                        });
+                        continue;
+                    }
+                }
 
                 // parse args if any
                 let mut args_text: Option<&str> = None;
@@ -272,7 +457,9 @@ fn compute_arg_counts(meta: &Function) -> (usize, usize) {
     (min, max)
 }
 
-fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
+/// Find matching bracket for escape functions - does NOT respect backslash escapes.
+/// This is used for $esc[...] and $escape[...] where we want to find the raw matching bracket.
+fn find_matching_bracket_raw(code: &str, open_idx: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, c) in code.char_indices().skip_while(|&(i, _)| i < open_idx) {
         if c == '[' {
@@ -287,6 +474,59 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
+/// Find matching brace for JavaScript expressions ${...}.
+/// Handles nested braces properly.
+fn find_matching_brace(code: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in code.char_indices().skip_while(|&(i, _)| i < open_idx) {
+        if c == '{' {
+            depth += 1;
+        } else if c == '}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Find matching bracket respecting backslash escapes.
+/// Escaped brackets (\[ and \]) are not counted.
+fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0;
+    let bytes = code.as_bytes();
+
+    for (i, c) in code.char_indices().skip_while(|&(i, _)| i < open_idx) {
+        // Check if this character is escaped
+        let is_esc = i > 0 && {
+            let mut backslash_count = 0;
+            let mut pos = i;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            backslash_count % 2 == 1
+        };
+
+        if !is_esc {
+            if c == '[' {
+                depth += 1;
+            } else if c == ']' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn parse_nested_args(
     input: &str,
     manager: Arc<MetadataManager>,
@@ -294,15 +534,42 @@ fn parse_nested_args(
     let mut args = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
+    let bytes = input.as_bytes();
 
-    for c in input.chars() {
+    for (i, c) in input.char_indices() {
+        // Check if current character is escaped (odd number of preceding backslashes)
+        let is_esc = i > 0 && {
+            let mut backslash_count = 0;
+            let mut pos = i;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            backslash_count % 2 == 1
+        };
+
+        if is_esc {
+            // This character is escaped, just add it as-is
+            current.push(c);
+            continue;
+        }
+
         match c {
+            '\\' => {
+                current.push(c);
+            }
             '[' => {
                 depth += 1;
                 current.push(c);
             }
             ']' => {
-                depth -= 1;
+                if depth > 0 {
+                    depth -= 1;
+                }
                 current.push(c);
             }
             ';' if depth == 0 => {
@@ -316,7 +583,9 @@ fn parse_nested_args(
                 }
                 current.clear();
             }
-            _ => current.push(c),
+            _ => {
+                current.push(c);
+            }
         }
     }
 

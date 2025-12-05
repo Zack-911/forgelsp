@@ -4,6 +4,29 @@ use tower_lsp::lsp_types::*;
 use crate::server::ForgeScriptServer;
 use crate::utils::spawn_log;
 
+/// Check if a character at the given byte index is escaped by a backslash
+fn is_escaped(text: &str, byte_idx: usize) -> bool {
+    if byte_idx == 0 {
+        return false;
+    }
+
+    let bytes = text.as_bytes();
+    let mut backslash_count = 0;
+    let mut pos = byte_idx;
+
+    while pos > 0 {
+        pos -= 1;
+        if bytes[pos] == b'\\' {
+            backslash_count += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Odd number of backslashes means the character is escaped
+    backslash_count % 2 == 1
+}
+
 /// Handles hover requests for ForgeScript
 pub async fn handle_hover(
     server: &ForgeScriptServer,
@@ -52,8 +75,13 @@ pub async fn handle_hover(
     let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '$';
     let bytes = text.as_bytes();
 
+    // Find start of token, skipping escaped $ characters
     let mut start_pos = offset;
     while start_pos > 0 && is_ident_char(bytes[start_pos - 1] as char) {
+        // If we hit a $, check if it's escaped
+        if bytes[start_pos - 1] == b'$' && is_escaped(&text, start_pos - 1) {
+            break;
+        }
         start_pos -= 1;
     }
 
@@ -67,6 +95,16 @@ pub async fn handle_hover(
     }
 
     let token = text[start_pos..end].to_string();
+
+    // Don't provide hover for escape functions or JavaScript expressions
+    if token == "$esc" || token == "$escape" {
+        return Ok(None);
+    }
+
+    // Check if this is a JavaScript expression ${...}
+    if token.starts_with("${") {
+        return Ok(None);
+    }
 
     // Acquire a read lock on the manager
     let mgr = server.manager.read().unwrap();
