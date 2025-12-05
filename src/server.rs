@@ -435,8 +435,7 @@ impl LanguageServer for ForgeScriptServer {
             return Ok(None);
         };
 
-        let mgr = self.manager.read().unwrap().clone();
-        let tokens = extract_semantic_tokens(text, mgr);
+        let tokens = extract_semantic_tokens(text);
 
         spawn_log(
             self.client.clone(),
