@@ -226,6 +226,15 @@ impl MetadataManager {
 
         let mut trie = self.trie.write().unwrap();
         for func in all_funcs {
+            if let Some(aliases) = &func.aliases {
+                for alias in aliases {
+                    let mut alias_func = func.clone();
+                    alias_func.name = alias.clone();
+                    let arc_alias_func = Arc::new(alias_func);
+                    trie.insert(alias, arc_alias_func);
+                }
+            }
+
             let arc_func = Arc::new(func);
             trie.insert(&arc_func.name, arc_func.clone());
         }

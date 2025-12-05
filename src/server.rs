@@ -113,7 +113,6 @@ impl LanguageServer for ForgeScriptServer {
                             legend: SemanticTokensLegend {
                                 token_types: vec![
                                     SemanticTokenType::FUNCTION,
-                                    SemanticTokenType::STRING,
                                     SemanticTokenType::KEYWORD,
                                     SemanticTokenType::NUMBER,
                                 ],
@@ -218,17 +217,37 @@ impl LanguageServer for ForgeScriptServer {
             let line = lines.get(position.line as usize).unwrap_or(&"");
             let before_cursor = &line[..position.character as usize];
 
-            if before_cursor.ends_with('$') || before_cursor.contains('$') {
+            if let Some(last_dollar_idx) = before_cursor.rfind('$') {
+                let after_dollar = &before_cursor[last_dollar_idx + 1..];
+                let mut modifier = "";
+
+                if after_dollar.starts_with('!') {
+                    modifier = "!";
+                } else if after_dollar.starts_with('.') {
+                    modifier = ".";
+                }
+
                 let items: Vec<CompletionItem> = self
                     .all_functions()
                     .into_iter()
-                    .map(|f| CompletionItem {
-                        label: f.name.clone(),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(f.category.clone()),
-                        documentation: Some(Documentation::String(f.description.clone())),
-                        insert_text: Some(f.name.clone()),
-                        ..Default::default()
+                    .map(|f| {
+                        let base = f.name.clone();
+                        let name = if !modifier.is_empty() && base.starts_with('$') {
+                            format!("${}{}", modifier, &base[1..])
+                        } else {
+                            base.clone()
+                        };
+
+                        CompletionItem {
+                            label: name.clone(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            detail: Some(f.category.clone()),
+                            documentation: Some(Documentation::String(f.description.clone())),
+                            insert_text: Some(name),
+                            // Important: filter WITHOUT modifier
+                            filter_text: Some(base),
+                            ..Default::default()
+                        }
                     })
                     .collect();
 

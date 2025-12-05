@@ -9,7 +9,7 @@ pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
         r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|![a-zA-Z_][a-zA-Z0-9_]*|#[a-zA-Z_][a-zA-Z0-9_]*|@\[[^\]]*\])",
     )
     .unwrap();
-    let string_re = Regex::new(r#""([^"\\]|\\.)*"|'([^'\\]|\\.)*'"#).unwrap();
+
     let number_re = Regex::new(r"\b\d+(?:\.\d+)?\b").unwrap();
     let bool_re = Regex::new(r"\b(?:true|false)\b").unwrap();
     let semicolon_re = Regex::new(r";").unwrap();
@@ -23,10 +23,9 @@ pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
 
             for (regex, token_type) in [
                 (&func_re, 0),      // FUNCTION
-                (&string_re, 1),    // STRING
-                (&bool_re, 2),      // KEYWORD
-                (&number_re, 3),    // NUMBER
-                (&semicolon_re, 2), // KEYWORD (reuse)
+                (&bool_re, 1),      // KEYWORD
+                (&number_re, 2),    // NUMBER
+                (&semicolon_re, 1), // KEYWORD (reuse)
             ] {
                 for m in regex.find_iter(code) {
                     found.push((m.start() + code_start, m.end() + code_start, token_type));

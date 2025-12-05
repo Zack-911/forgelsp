@@ -534,33 +534,30 @@ fn parse_nested_args(
     let mut args = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
-    let bytes = input.as_bytes();
+    let mut seen_separator = false;
+    let mut iter = input.char_indices().peekable();
+    let mut first_char_escaped = false;
+    let mut is_start_of_arg = true;
 
-    for (i, c) in input.char_indices() {
-        // Check if current character is escaped (odd number of preceding backslashes)
-        let is_esc = i > 0 && {
-            let mut backslash_count = 0;
-            let mut pos = i;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            backslash_count % 2 == 1
-        };
-
-        if is_esc {
-            // This character is escaped, just add it as-is
-            current.push(c);
-            continue;
-        }
-
+    while let Some((_, c)) = iter.next() {
         match c {
             '\\' => {
-                current.push(c);
+                if let Some(&(_, next_c)) = iter.peek() {
+                    match next_c {
+                        '$' | '[' | ']' | ';' | '\\' => {
+                            if is_start_of_arg && next_c == '$' {
+                                first_char_escaped = true;
+                            }
+                            current.push(next_c);
+                            iter.next();
+                        }
+                        _ => {
+                            current.push('\\');
+                        }
+                    }
+                } else {
+                    current.push('\\');
+                }
             }
             '[' => {
                 depth += 1;
@@ -573,26 +570,41 @@ fn parse_nested_args(
                 current.push(c);
             }
             ';' if depth == 0 => {
+                seen_separator = true;
                 let trimmed = current.trim();
                 if !trimmed.is_empty() {
-                    args.push(parse_single_arg(trimmed, manager.clone())?);
+                    args.push(parse_single_arg(
+                        trimmed,
+                        manager.clone(),
+                        first_char_escaped,
+                    )?);
                 } else {
                     args.push(smallvec![ParsedArg::Literal {
                         text: Cow::Owned(String::new())
                     }]);
                 }
                 current.clear();
+                first_char_escaped = false;
+                is_start_of_arg = true;
+                continue; // Skip setting is_start_of_arg to false
             }
             _ => {
                 current.push(c);
             }
         }
+        is_start_of_arg = false;
     }
 
-    if !current.is_empty() {
+    // Always add the last argument if we saw a separator (e.g., "user;" should have 2 args)
+    // or if there's any content remaining
+    if seen_separator || !current.is_empty() {
         let trimmed = current.trim();
         if !trimmed.is_empty() {
-            args.push(parse_single_arg(trimmed, manager.clone())?);
+            args.push(parse_single_arg(
+                trimmed,
+                manager.clone(),
+                first_char_escaped,
+            )?);
         } else {
             args.push(smallvec![ParsedArg::Literal {
                 text: Cow::Owned(String::new())
@@ -606,8 +618,9 @@ fn parse_nested_args(
 fn parse_single_arg(
     input: &str,
     manager: Arc<MetadataManager>,
+    force_literal: bool,
 ) -> Result<SmallVec<[ParsedArg; 8]>, nom::Err<()>> {
-    if input.starts_with('$') {
+    if !force_literal && input.starts_with('$') {
         let parser = ForgeScriptParser::new(manager.clone(), input);
         let res = parser.parse();
         if let Some(f) = res.functions.first() {
