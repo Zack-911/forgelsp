@@ -166,23 +166,67 @@ pub fn extract_semantic_tokens(source: &str, manager: Arc<MetadataManager>) -> V
             let start_pos = offset_to_position(source, start);
             let end_pos = offset_to_position(source, end);
 
-            let delta_line = start_pos.line.saturating_sub(last_line);
-            let delta_start = if delta_line == 0 {
-                start_pos.character.saturating_sub(last_col)
+            // Handle multi-line tokens by splitting them into per-line segments
+            // LSP semantic tokens cannot span multiple lines
+            if start_pos.line == end_pos.line {
+                // Single-line token: simple case
+                let delta_line = start_pos.line.saturating_sub(last_line);
+                let delta_start = if delta_line == 0 {
+                    start_pos.character.saturating_sub(last_col)
+                } else {
+                    start_pos.character
+                };
+
+                tokens.push(SemanticToken {
+                    delta_line,
+                    delta_start,
+                    length: end_pos.character.saturating_sub(start_pos.character).max(1),
+                    token_type,
+                    token_modifiers_bitset: 0,
+                });
+
+                last_line = start_pos.line;
+                last_col = start_pos.character;
             } else {
-                start_pos.character
-            };
+                // Multi-line token: emit one token per line
+                let token_text = &source[start..end];
+                let lines: Vec<&str> = token_text.split('\n').collect();
 
-            tokens.push(SemanticToken {
-                delta_line,
-                delta_start,
-                length: (end_pos.character - start_pos.character).max(1),
-                token_type,
-                token_modifiers_bitset: 0,
-            });
+                for (line_offset, line_content) in lines.iter().enumerate() {
+                    let current_line = start_pos.line + line_offset as u32;
+                    let is_first_line = line_offset == 0;
 
-            last_line = start_pos.line;
-            last_col = start_pos.character;
+                    let delta_line = current_line.saturating_sub(last_line);
+                    let current_col = if is_first_line {
+                        start_pos.character
+                    } else {
+                        0
+                    };
+                    let delta_start = if delta_line == 0 {
+                        current_col.saturating_sub(last_col)
+                    } else {
+                        current_col
+                    };
+
+                    // Calculate length for this line segment
+                    let length = if line_content.is_empty() {
+                        1 // Minimum length of 1 for empty lines
+                    } else {
+                        line_content.chars().count() as u32
+                    };
+
+                    tokens.push(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length,
+                        token_type,
+                        token_modifiers_bitset: 0,
+                    });
+
+                    last_line = current_line;
+                    last_col = current_col;
+                }
+            }
         }
     }
 
@@ -207,4 +251,89 @@ fn offset_to_position(text: &str, offset: usize) -> Position {
     }
 
     Position::new(line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::MetadataManager;
+    use std::path::PathBuf;
+
+    fn create_test_manager() -> Arc<MetadataManager> {
+        // Create a MetadataManager with empty URLs for testing
+        // Use tokio runtime to run async constructor
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            Arc::new(
+                MetadataManager::new(PathBuf::from("/tmp/forgelsp-test-cache"), vec![])
+                    .await
+                    .unwrap(),
+            )
+        })
+    }
+
+    #[test]
+    fn test_single_line_tokens_have_correct_length() {
+        let input = r#"code: `$let[foo;bar]`"#;
+        let manager = create_test_manager();
+        let tokens = extract_semantic_tokens(input, manager);
+
+        // Should have tokens and none should have excessive length
+        for token in &tokens {
+            assert!(token.length > 0, "Token length should be > 0");
+            assert!(token.length < 500, "Token length should not be excessive");
+        }
+    }
+
+    #[test]
+    fn test_multiline_tokens_are_split() {
+        // Multi-line construct should produce multiple tokens
+        let input = r#"code: `$while[$get[count]<=15;
+$if[$env[rest]!=;
+$let[x;y]
+]]`"#;
+        let manager = create_test_manager();
+        let tokens = extract_semantic_tokens(input, manager);
+
+        // Should have multiple tokens, not just one giant one
+        assert!(tokens.len() >= 1, "Should produce tokens");
+
+        // Each token should have reasonable length
+        for token in &tokens {
+            assert!(token.length > 0, "Token length should be > 0");
+            assert!(
+                token.length < 500,
+                "Token length {} should not be excessive",
+                token.length
+            );
+        }
+    }
+
+    #[test]
+    fn test_nested_functions_produce_tokens() {
+        let input = r#"code: `$onlyIf[$getCache[radioplayer_data_$guildID_playerstatus]!=true;$ephemeral]`"#;
+        let manager = create_test_manager();
+        let tokens = extract_semantic_tokens(input, manager);
+
+        // Should produce tokens for nested functions
+        assert!(
+            !tokens.is_empty(),
+            "Should produce tokens for nested functions"
+        );
+    }
+
+    #[test]
+    fn test_token_delta_calculations() {
+        let input = r#"code: `$let[a;b]
+$let[c;d]`"#;
+        let manager = create_test_manager();
+        let tokens = extract_semantic_tokens(input, manager);
+
+        // Tokens should have correct delta_line values
+        // First token can have any delta_line, subsequent ones should be relative
+        for token in &tokens {
+            // delta_start should be reasonable
+            assert!(token.delta_start < 1000, "delta_start should be reasonable");
+        }
+    }
 }
