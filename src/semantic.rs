@@ -4,7 +4,7 @@ use tower_lsp::lsp_types::{Position, SemanticToken};
 /// Extract tokens using regex-based rules inside code blocks
 pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
-    let code_block_re = Regex::new(r"code:\s*`{1,3}([\s\S]*?)`{1,3}").unwrap();
+    let code_block_re = Regex::new(r"code:\s*`{1,3}((?:\\`|[\s\S])*?)`{1,3}").unwrap();
     let func_re = Regex::new(
         r"\$(?:[a-zA-Z_][a-zA-Z0-9_]*|![a-zA-Z_][a-zA-Z0-9_]*|#[a-zA-Z_][a-zA-Z0-9_]*|@\[[^\]]*\])",
     )
