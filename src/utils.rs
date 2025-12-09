@@ -14,7 +14,7 @@ pub fn spawn_log(client: Client, ty: MessageType, msg: String) {
 pub struct ForgeConfig {
     pub urls: Vec<String>,
     #[serde(default)]
-    pub function_highlight_colors: Option<bool>,
+    pub multiple_function_colors: Option<bool>,
 }
 
 /// Loads `forgeconfig.json` from any workspace folder.

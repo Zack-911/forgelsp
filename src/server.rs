@@ -16,7 +16,7 @@ pub struct ForgeScriptServer {
     pub documents: Arc<RwLock<HashMap<Url, String>>>,
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>,
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
-    pub use_function_colors: Arc<RwLock<bool>>,
+    pub multiple_function_colors: Arc<RwLock<bool>>,
 }
 
 impl ForgeScriptServer {
@@ -84,7 +84,7 @@ impl LanguageServer for ForgeScriptServer {
                 
                 // Load function color highlighting setting
                 if let Some(use_colors) = config.multiple_function_colors {
-                    *self.use_function_colors.write().unwrap() = use_colors;
+                    *self.multiple_function_colors.write().unwrap() = use_colors;
                 }
             }
         }
@@ -462,7 +462,7 @@ impl LanguageServer for ForgeScriptServer {
             return Ok(None);
         };
 
-        let use_colors = *self.use_function_colors.read().unwrap();
+        let use_colors = *self.multiple_function_colors.read().unwrap();
         let tokens = extract_semantic_tokens_with_colors(text, use_colors);
 
         spawn_log(
