@@ -49,6 +49,7 @@ async fn main() {
         documents: Arc::new(RwLock::new(HashMap::new())),
         parsed_cache: Arc::new(RwLock::new(HashMap::new())),
         workspace_folders: Arc::new(RwLock::new(workspace_folders.clone())),
+        use_function_colors: Arc::new(RwLock::new(false)),
     });
 
     Server::new(stdin(), stdout(), socket).serve(service).await;

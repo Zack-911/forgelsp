@@ -11,8 +11,10 @@ pub fn spawn_log(client: Client, ty: MessageType, msg: String) {
 }
 
 #[derive(Debug, Deserialize)]
-struct ForgeConfig {
-    urls: Vec<String>,
+pub struct ForgeConfig {
+    pub urls: Vec<String>,
+    #[serde(default)]
+    pub function_highlight_colors: Option<bool>,
 }
 
 /// Loads `forgeconfig.json` from any workspace folder.
@@ -24,6 +26,11 @@ struct ForgeConfig {
 /// These are expanded to:
 ///   https://raw.githubusercontent.com/owner/repo/<branch>/forge.json
 pub fn load_forge_config(workspace_folders: &[PathBuf]) -> Option<Vec<String>> {
+    load_forge_config_full(workspace_folders).map(|cfg| cfg.urls)
+}
+
+/// Loads the full `forgeconfig.json` configuration from any workspace folder.
+pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<ForgeConfig> {
     for folder in workspace_folders {
         let path = folder.join("forgeconfig.json");
 
@@ -38,17 +45,17 @@ pub fn load_forge_config(workspace_folders: &[PathBuf]) -> Option<Vec<String>> {
             }
         };
 
-        let raw = match serde_json::from_str::<ForgeConfig>(&data) {
+        let mut raw = match serde_json::from_str::<ForgeConfig>(&data) {
             Ok(cfg) => cfg,
             Err(_) => {
                 continue;
             }
         };
 
-        // Transform shorthand into fully-qualified URLs
-        let urls: Vec<String> = raw.urls.into_iter().map(resolve_github_shorthand).collect();
+        // Transform shorthand URLs into fully-qualified URLs
+        raw.urls = raw.urls.into_iter().map(resolve_github_shorthand).collect();
 
-        return Some(urls);
+        return Some(raw);
     }
 
     None

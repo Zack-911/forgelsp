@@ -2,8 +2,8 @@ use crate::diagnostics::publish_diagnostics;
 use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
-use crate::semantic::extract_semantic_tokens;
-use crate::utils::{load_forge_config, spawn_log};
+use crate::semantic::extract_semantic_tokens_with_colors;
+use crate::utils::{load_forge_config_full, spawn_log};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -16,6 +16,7 @@ pub struct ForgeScriptServer {
     pub documents: Arc<RwLock<HashMap<Url, String>>>,
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>,
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
+    pub use_function_colors: Arc<RwLock<bool>>,
 }
 
 impl ForgeScriptServer {
@@ -69,7 +70,8 @@ impl LanguageServer for ForgeScriptServer {
                 .collect::<Vec<_>>();
             *self.workspace_folders.write().unwrap() = paths.clone();
 
-            if let Some(urls) = load_forge_config(&paths) {
+            if let Some(config) = load_forge_config_full(&paths) {
+                let urls = config.urls.clone();
                 let manager = MetadataManager::new("./.cache", urls)
                     .await
                     .expect("Failed to initialize metadata manager");
@@ -79,6 +81,11 @@ impl LanguageServer for ForgeScriptServer {
                     .expect("Failed to load metadata sources");
 
                 *self.manager.write().unwrap() = Arc::new(manager);
+                
+                // Load function color highlighting setting
+                if let Some(use_colors) = config.multiple_function_colors {
+                    *self.use_function_colors.write().unwrap() = use_colors;
+                }
             }
         }
 
@@ -112,9 +119,10 @@ impl LanguageServer for ForgeScriptServer {
                             },
                             legend: SemanticTokensLegend {
                                 token_types: vec![
-                                    SemanticTokenType::FUNCTION,
-                                    SemanticTokenType::KEYWORD,
-                                    SemanticTokenType::NUMBER,
+                                    SemanticTokenType::FUNCTION,      // 0
+                                    SemanticTokenType::KEYWORD,       // 1
+                                    SemanticTokenType::NUMBER,        // 2
+                                    SemanticTokenType::PARAMETER,     // 3
                                 ],
                                 token_modifiers: vec![],
                             },
@@ -454,7 +462,8 @@ impl LanguageServer for ForgeScriptServer {
             return Ok(None);
         };
 
-        let tokens = extract_semantic_tokens(text);
+        let use_colors = *self.use_function_colors.read().unwrap();
+        let tokens = extract_semantic_tokens_with_colors(text, use_colors);
 
         spawn_log(
             self.client.clone(),

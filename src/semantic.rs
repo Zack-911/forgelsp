@@ -3,6 +3,13 @@ use tower_lsp::lsp_types::{Position, SemanticToken};
 
 /// Extract tokens using regex-based rules inside code blocks
 pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
+    extract_semantic_tokens_with_colors(source, false)
+}
+
+/// Extract tokens with optional multi-color function highlighting
+/// When `use_function_colors` is true, functions alternate between FUNCTION (0) and PARAMETER (3)
+/// token types sequentially as they appear in the code.
+pub fn extract_semantic_tokens_with_colors(source: &str, use_function_colors: bool) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let code_block_re = Regex::new(r"code:\s*`{1,3}((?:\\`|[\s\S])*?)`{1,3}").unwrap();
     let func_re = Regex::new(
@@ -14,6 +21,8 @@ pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
     let bool_re = Regex::new(r"\b(?:true|false)\b").unwrap();
     let semicolon_re = Regex::new(r";").unwrap();
 
+    let mut function_color_index = 0u32;
+
     for block in code_block_re.captures_iter(source) {
         if let Some(code_match) = block.get(1) {
             let code = code_match.as_str();
@@ -21,8 +30,27 @@ pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
 
             let mut found = Vec::new();
 
+            // Collect function matches
+            let func_matches: Vec<_> = func_re
+                .find_iter(code)
+                .map(|m| (m.start() + code_start, m.end() + code_start))
+                .collect();
+
+            // Add function tokens with alternating color assignment
+            for (start, end) in func_matches {
+                let token_type = if use_function_colors {
+                    let colors = [0, 3]; // FUNCTION, PARAMETER
+                    let color = colors[(function_color_index as usize) % colors.len()];
+                    function_color_index += 1;
+                    color
+                } else {
+                    0 // Default FUNCTION type
+                };
+                found.push((start, end, token_type));
+            }
+
+            // Add other token types
             for (regex, token_type) in [
-                (&func_re, 0),      // FUNCTION
                 (&bool_re, 1),      // KEYWORD
                 (&number_re, 2),    // NUMBER
                 (&semicolon_re, 1), // KEYWORD (reuse)
