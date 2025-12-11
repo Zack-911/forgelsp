@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::io::{stdin, stdout};
 use tower_lsp::{LspService, Server};
-use utils::load_forge_config;
+use utils::{load_forge_config, load_forge_config_full};
 
 #[tokio::main]
 async fn main() {
@@ -38,6 +38,17 @@ async fn main() {
         .load_all()
         .await
         .expect("Failed to load metadata sources");
+
+    // Load custom functions from config if available
+    if let Some(config) = load_forge_config_full(&workspace_folders) {
+        if let Some(custom_funcs) = config.custom_functions {
+            if !custom_funcs.is_empty() {
+                manager
+                    .add_custom_functions(custom_funcs)
+                    .expect("Failed to add custom functions");
+            }
+        }
+    }
 
     // Wrap manager in RwLock so LSP server can update it dynamically
     let manager_wrapped = Arc::new(RwLock::new(manager));

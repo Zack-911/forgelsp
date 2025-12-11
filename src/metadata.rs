@@ -241,6 +241,80 @@ impl MetadataManager {
         Ok(())
     }
 
+    pub fn add_custom_functions(&self, custom_funcs: Vec<crate::utils::CustomFunction>) -> Result<()> {
+        let mut trie = self.trie.write().unwrap();
+        
+        for custom in custom_funcs {
+            // Convert custom function params to standard Arg format
+            let args = if let Some(params) = custom.params {
+                match params {
+                    JsonValue::Array(arr) => {
+                        let mut parsed_args = Vec::new();
+                        for item in arr {
+                            if let JsonValue::Object(obj) = item {
+                                // Parse as CustomFunctionParam
+                                if let Ok(param) = serde_json::from_value::<crate::utils::CustomFunctionParam>(JsonValue::Object(obj.clone())) {
+                                    parsed_args.push(Arg {
+                                        name: param.name,
+                                        description: param.description.unwrap_or_default(),
+                                        rest: false,
+                                        required: param.required,
+                                        arg_type: JsonValue::String(param.param_type),
+                                        condition: None,
+                                        arg_enum: None,
+                                        enum_name: None,
+                                        pointer: None,
+                                        pointer_property: None,
+                                    });
+                                }
+                            } else if let JsonValue::String(_) = item {
+                                // Simple string param
+                                if let JsonValue::String(name) = item {
+                                    parsed_args.push(Arg {
+                                        name,
+                                        description: String::new(),
+                                        rest: false,
+                                        required: Some(true),
+                                        arg_type: JsonValue::String("String".to_string()),
+                                        condition: None,
+                                        arg_enum: None,
+                                        enum_name: None,
+                                        pointer: None,
+                                        pointer_property: None,
+                                    });
+                                }
+                            }
+                        }
+                        if parsed_args.is_empty() { None } else { Some(parsed_args) }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let func = Function {
+                name: custom.name.clone(),
+                version: JsonValue::String("1.0.0".to_string()),
+                description: custom.description.unwrap_or_else(|| "Custom function".to_string()),
+                brackets: Some(true),
+                unwrap: false,
+                args,
+                output: None,
+                category: "custom".to_string(),
+                aliases: None,
+                experimental: None,
+                examples: None,
+                deprecated: None,
+            };
+
+            let arc_func = Arc::new(func);
+            trie.insert(&custom.name, arc_func);
+        }
+        
+        Ok(())
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
         let trie = self.trie.read().unwrap();
         trie.get(name).map(|(_, func)| func)

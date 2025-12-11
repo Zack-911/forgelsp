@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::PathBuf;
 use tower_lsp::Client;
@@ -10,11 +11,33 @@ pub fn spawn_log(client: Client, ty: MessageType, msg: String) {
     });
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomFunctionParam {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub param_type: String,
+    #[serde(default)]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomFunction {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub params: Option<JsonValue>, // Can be array of objects or array of strings
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ForgeConfig {
     pub urls: Vec<String>,
     #[serde(default)]
     pub multiple_function_colors: Option<bool>,
+    #[serde(default)]
+    pub custom_functions: Option<Vec<CustomFunction>>,
 }
 
 /// Loads `forgeconfig.json` from any workspace folder.

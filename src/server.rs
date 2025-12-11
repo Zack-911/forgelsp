@@ -80,6 +80,15 @@ impl LanguageServer for ForgeScriptServer {
                     .await
                     .expect("Failed to load metadata sources");
 
+                // Load custom functions from config if available
+                if let Some(custom_funcs) = config.custom_functions {
+                    if !custom_funcs.is_empty() {
+                        manager
+                            .add_custom_functions(custom_funcs)
+                            .expect("Failed to add custom functions");
+                    }
+                }
+
                 *self.manager.write().unwrap() = Arc::new(manager);
                 
                 // Load function color highlighting setting
