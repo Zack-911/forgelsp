@@ -2,6 +2,7 @@ use crate::metadata::{Function, MetadataManager};
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::sync::Arc;
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -136,14 +137,75 @@ fn is_escape_function(name: &str) -> bool {
 pub struct ForgeScriptParser<'a> {
     manager: Arc<MetadataManager>,
     code: &'a str,
+    skip_extraction: bool,
 }
 
 impl<'a> ForgeScriptParser<'a> {
     pub fn new(manager: Arc<MetadataManager>, code: &'a str) -> Self {
-        Self { manager, code }
+        Self { manager, code, skip_extraction: false }
+    }
+
+    fn new_internal(manager: Arc<MetadataManager>, code: &'a str) -> Self {
+        Self { manager, code, skip_extraction: true }
     }
 
     pub fn parse(&self) -> ParseResult {
+        // If we're already inside extracted code, skip extraction and go straight to parsing
+        if self.skip_extraction {
+            return self.parse_internal();
+        }
+
+        // Extract code blocks using regex - match code: ` ... ` pattern (template literals)
+        let code_block_regex = Regex::new(r"code:\s*`([\s\S]*?)`").unwrap();
+        
+        // Check if there are any code blocks
+        if code_block_regex.is_match(self.code) {
+            // Extract all code block contents with their original offsets
+            let mut code_to_parse = String::new();
+            let mut offsets: Vec<usize> = Vec::new();
+            let mut block_count = 0;
+            
+            for cap in code_block_regex.captures_iter(self.code) {
+                if let Some(content) = cap.get(1) {
+                    block_count += 1;
+                    let offset = content.start();
+                    offsets.push(offset);
+                    eprintln!("[Parser] Found code block #{}: {} chars at offset {}", block_count, content.as_str().len(), offset);
+                    code_to_parse.push_str(content.as_str());
+                    code_to_parse.push('\n');
+                }
+            }
+            
+            eprintln!("[Parser] Total code blocks found: {}", block_count);
+            eprintln!("[Parser] Total content to parse: {} chars", code_to_parse.len());
+            
+            // Parse only the extracted code block contents
+            let parser = ForgeScriptParser::new_internal(self.manager.clone(), &code_to_parse);
+            let mut result = parser.parse();
+            
+            // Adjust positions back to original file coordinates
+            if !offsets.is_empty() {
+                let offset = offsets[0]; // Use first block's offset for now
+                for diag in &mut result.diagnostics {
+                    diag.start += offset;
+                    diag.end += offset;
+                }
+                for func in &mut result.functions {
+                    func.span.0 += offset;
+                    func.span.1 += offset;
+                }
+            }
+            
+            return result;
+        }
+        ParseResult {
+            tokens: Vec::new(),
+            diagnostics: Vec::new(),
+            functions: Vec::new(),
+        }
+    }
+
+    fn parse_internal(&self) -> ParseResult {
         let mut tokens: Vec<Token> = Vec::new();
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let mut functions: Vec<ParsedFunction> = Vec::new();
