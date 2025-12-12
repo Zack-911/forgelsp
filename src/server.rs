@@ -90,7 +90,7 @@ impl LanguageServer for ForgeScriptServer {
                 }
 
                 *self.manager.write().unwrap() = Arc::new(manager);
-                
+
                 // Load function color highlighting setting
                 if let Some(use_colors) = config.multiple_function_colors {
                     *self.multiple_function_colors.write().unwrap() = use_colors;
@@ -128,10 +128,12 @@ impl LanguageServer for ForgeScriptServer {
                             },
                             legend: SemanticTokensLegend {
                                 token_types: vec![
-                                    SemanticTokenType::FUNCTION,      // 0
-                                    SemanticTokenType::KEYWORD,       // 1
-                                    SemanticTokenType::NUMBER,        // 2
-                                    SemanticTokenType::PARAMETER,     // 3
+                                    SemanticTokenType::FUNCTION,  // 0
+                                    SemanticTokenType::KEYWORD,   // 1
+                                    SemanticTokenType::NUMBER,    // 2
+                                    SemanticTokenType::PARAMETER, // 3
+                                    SemanticTokenType::STRING,    // 4
+                                    SemanticTokenType::COMMENT,   // 5
                                 ],
                                 token_modifiers: vec![],
                             },
@@ -472,7 +474,8 @@ impl LanguageServer for ForgeScriptServer {
         };
 
         let use_colors = *self.multiple_function_colors.read().unwrap();
-        let tokens = extract_semantic_tokens_with_colors(text, use_colors);
+        let mgr = self.manager.read().unwrap().clone();
+        let tokens = extract_semantic_tokens_with_colors(text, use_colors, mgr);
 
         spawn_log(
             self.client.clone(),
