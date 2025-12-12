@@ -1,3 +1,15 @@
+//! # Semantic Token Extraction Module
+//!
+//! Extracts semantic tokens from ForgeScript code for syntax highlighting.
+//! Validates function names against metadata to ensure only valid functions are highlighted.
+//!
+//! Supports:
+//! - Metadata-validated function highlighting
+//! - Multi-color function highlighting (alternating colors)
+//! - Comment detection (`$c[...]`)
+//! - Escape function special handling (`$esc`, `$escapeCode`)
+//! - Number, boolean, and semicolon highlighting
+
 use crate::metadata::MetadataManager;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{Position, SemanticToken};
@@ -9,7 +21,6 @@ use tower_lsp::lsp_types::{Position, SemanticToken};
 /// 3 = PARAMETER (alternating function color)
 /// 4 = STRING (escape function content)
 /// 5 = COMMENT (comments)
-
 /// Check if a character is escaped
 fn is_char_escaped(bytes: &[u8], idx: usize) -> bool {
     if idx == 0 {
@@ -60,10 +71,10 @@ fn is_char_escaped(bytes: &[u8], idx: usize) -> bool {
 /// Find matching bracket (raw, no escape handling)
 fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
     let mut depth = 0;
-    for i in open_idx..code.len() {
-        if code[i] == b'[' {
+    for (i, &byte) in code.iter().enumerate().skip(open_idx) {
+        if byte == b'[' {
             depth += 1;
-        } else if code[i] == b']' {
+        } else if byte == b']' {
             depth -= 1;
             if depth == 0 {
                 return Some(i);
@@ -149,15 +160,17 @@ fn extract_tokens_from_code(
         // Check for functions
         if c == b'$' && !is_char_escaped(bytes, i) {
             // Check for $c[...] (comment)
-            if i + 1 < bytes.len() && bytes[i + 1] == b'c' {
-                if i + 2 < bytes.len() && bytes[i + 2] == b'[' {
-                    // Found comment function
-                    if let Some(end_idx) = find_matching_bracket_raw(bytes, i + 2) {
-                        // Highlight entire $c[...] as KEYWORD (comment)
-                        found.push((i + code_start, end_idx + 1 + code_start, 5));
-                        i = end_idx + 1;
-                        continue;
-                    }
+            if i + 1 < bytes.len()
+                && bytes[i + 1] == b'c'
+                && i + 2 < bytes.len()
+                && bytes[i + 2] == b'['
+            {
+                // Found comment function
+                if let Some(end_idx) = find_matching_bracket_raw(bytes, i + 2) {
+                    // Highlight entire $c[...] as KEYWORD (comment)
+                    found.push((i + code_start, end_idx + 1 + code_start, 5));
+                    i = end_idx + 1;
+                    continue;
                 }
             }
 

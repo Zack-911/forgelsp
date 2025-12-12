@@ -50,6 +50,15 @@ forgelsp/
 │   ├── diagnostics.rs   # Diagnostic publishing utilities
 │   ├── semantic.rs      # Semantic token extraction
 │   └── utils.rs         # Helper functions and config loading
+├── docs/                # Comprehensive module documentation
+│   ├── main.md          # Entry point documentation
+│   ├── server.md        # LSP server documentation
+│   ├── hover.md         # Hover feature documentation
+│   ├── parser.md        # Parser implementation details
+│   ├── metadata.md      # Metadata management guide
+│   ├── diagnostics.md   # Diagnostics system overview
+│   ├── semantic.md      # Semantic highlighting details
+│   └── utils.md         # Utility functions reference
 ├── .github/
 │   └── workflows/       # CI/CD pipelines
 ├── Cargo.toml           # Rust dependencies
@@ -112,6 +121,21 @@ Utility functions:
 
 ---
 
+## 📚 Documentation
+
+Comprehensive documentation for each module is available in the [`docs/`](./docs) directory:
+
+- **[main.md](./docs/main.md)** - Entry point initialization flow
+- **[server.md](./docs/server.md)** - LSP server implementation details
+- **[hover.md](./docs/hover.md)** - Hover provider logic
+- **[parser.md](./docs/parser.md)** - Parser implementation and escape handling
+- **[metadata.md](./docs/metadata.md)** - Metadata management and Trie algorithm
+- **[diagnostics.md](./docs/diagnostics.md)** - Diagnostic system overview
+- **[semantic.md](./docs/semantic.md)** - Semantic token extraction
+- **[utils.md](./docs/utils.md)** - Utility functions reference
+
+---
+
 ## 🔧 Dependencies
 
 | Crate | Version | Purpose |
@@ -127,7 +151,7 @@ Utility functions:
 | `anyhow` | 1.x | Error handling |
 | `base64` | 0.22.1 | URL-safe cache keys |
 | `futures` | 0.3.31 | Async utilities |
-| `tracing` | 0.1 | Structured logging |
+| `tracing-subscriber` | 0.3.22 | Structured logging |
 
 ---
 

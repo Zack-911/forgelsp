@@ -148,7 +148,6 @@ dependencies = [
  "smallvec",
  "tokio",
  "tower-lsp",
- "tracing",
  "tracing-subscriber",
 ]
 

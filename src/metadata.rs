@@ -1,3 +1,12 @@
+//! # Metadata Management Module
+//!
+//! Manages ForgeScript function metadata with three key components:
+//! - **Fetcher**: HTTP client with file-based caching for metadata sources
+//! - **FunctionTrie**: Prefix tree for O(k) function name lookup
+//! - **MetadataManager**: Orchestrates fetching, caching, and indexing of function metadata
+//!
+//! Supports loading from multiple URLs, GitHub shorthand syntax, and custom user-defined functions.
+
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future;
@@ -118,7 +127,8 @@ impl Fetcher {
             }
         }
 
-        if fail_count > 0 {}
+        // Silently ignore failures - we have cached data as fallback
+        let _ = fail_count;
 
         Ok(out)
     }
@@ -241,9 +251,12 @@ impl MetadataManager {
         Ok(())
     }
 
-    pub fn add_custom_functions(&self, custom_funcs: Vec<crate::utils::CustomFunction>) -> Result<()> {
+    pub fn add_custom_functions(
+        &self,
+        custom_funcs: Vec<crate::utils::CustomFunction>,
+    ) -> Result<()> {
         let mut trie = self.trie.write().unwrap();
-        
+
         for custom in custom_funcs {
             // Convert custom function params to standard Arg format
             let args = if let Some(params) = custom.params {
@@ -253,7 +266,11 @@ impl MetadataManager {
                         for item in arr {
                             if let JsonValue::Object(obj) = item {
                                 // Parse as CustomFunctionParam
-                                if let Ok(param) = serde_json::from_value::<crate::utils::CustomFunctionParam>(JsonValue::Object(obj.clone())) {
+                                if let Ok(param) =
+                                    serde_json::from_value::<crate::utils::CustomFunctionParam>(
+                                        JsonValue::Object(obj.clone()),
+                                    )
+                                {
                                     parsed_args.push(Arg {
                                         name: param.name,
                                         description: param.description.unwrap_or_default(),
@@ -285,7 +302,11 @@ impl MetadataManager {
                                 }
                             }
                         }
-                        if parsed_args.is_empty() { None } else { Some(parsed_args) }
+                        if parsed_args.is_empty() {
+                            None
+                        } else {
+                            Some(parsed_args)
+                        }
                     }
                     _ => None,
                 }
@@ -296,7 +317,9 @@ impl MetadataManager {
             let func = Function {
                 name: custom.name.clone(),
                 version: JsonValue::String("1.0.0".to_string()),
-                description: custom.description.unwrap_or_else(|| "Custom function".to_string()),
+                description: custom
+                    .description
+                    .unwrap_or_else(|| "Custom function".to_string()),
                 brackets: Some(true),
                 unwrap: false,
                 args,
@@ -311,7 +334,7 @@ impl MetadataManager {
             let arc_func = Arc::new(func);
             trie.insert(&custom.name, arc_func);
         }
-        
+
         Ok(())
     }
 

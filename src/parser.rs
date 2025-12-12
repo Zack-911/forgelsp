@@ -1,3 +1,16 @@
+//! # ForgeScript Parser Module
+//!
+//! Custom parser for ForgeScript syntax that handles:
+//! - Code block extraction from `code:` sections
+//! - Function call tokenization (`$functionName[args]`)
+//! - Complex escape sequence handling (backticks and special characters)
+//! - Nested bracket matching with escape function support
+//! - Argument parsing with nested function calls
+//! - Diagnostic generation for syntax errors
+//!
+//! The parser validates function calls against metadata and generates detailed
+//! error messages for invalid syntax or unknown functions.
+
 use crate::metadata::{Function, MetadataManager};
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
@@ -81,7 +94,7 @@ fn is_escaped(code: &str, byte_idx: usize) -> bool {
 
     let bytes = code.as_bytes();
     let c = bytes[byte_idx];
-    
+
     // For backtick, check if there's exactly 1 backslash before it
     if c == b'`' {
         if byte_idx >= 1 && bytes[byte_idx - 1] == b'\\' {
@@ -101,7 +114,7 @@ fn is_escaped(code: &str, byte_idx: usize) -> bool {
         }
         return false;
     }
-    
+
     // For special chars ($, ;, [, ]), check if there are exactly 2 backslashes before it
     if matches!(c, b'$' | b';' | b'[' | b']') {
         if byte_idx >= 2 && bytes[byte_idx - 1] == b'\\' && bytes[byte_idx - 2] == b'\\' {
@@ -121,7 +134,7 @@ fn is_escaped(code: &str, byte_idx: usize) -> bool {
         }
         return false;
     }
-    
+
     false
 }
 
@@ -132,7 +145,7 @@ pub fn unescape_string(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
-    
+
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             if i + 1 < bytes.len() {
@@ -181,42 +194,42 @@ fn is_escape_function(name: &str) -> bool {
 /// This helps bracket matchers skip escape function contents entirely.
 fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
     let bytes = code.as_bytes();
-    
+
     // Check if we're at a $ that's not escaped
     if dollar_idx >= code.len() || bytes[dollar_idx] != b'$' {
         return None;
     }
-    
+
     if is_escaped(code, dollar_idx) {
         return None;
     }
-    
+
     // Skip $ and any modifiers (!, #)
     let mut pos = dollar_idx + 1;
     while pos < bytes.len() && (bytes[pos] == b'!' || bytes[pos] == b'#') {
         pos += 1;
     }
-    
+
     // Read function name
     let name_start = pos;
     while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
         pos += 1;
     }
-    
+
     if pos == name_start {
         return None; // No function name
     }
-    
+
     let name = &code[name_start..pos];
     if !is_escape_function(name) {
         return None; // Not an escape function
     }
-    
+
     // Check for opening bracket
     if pos >= bytes.len() || bytes[pos] != b'[' {
         return None; // Escape function must have brackets
     }
-    
+
     // Find the matching bracket using raw matching (no escape handling)
     find_matching_bracket_raw(code, pos)
 }
@@ -229,11 +242,19 @@ pub struct ForgeScriptParser<'a> {
 
 impl<'a> ForgeScriptParser<'a> {
     pub fn new(manager: Arc<MetadataManager>, code: &'a str) -> Self {
-        Self { manager, code, skip_extraction: false }
+        Self {
+            manager,
+            code,
+            skip_extraction: false,
+        }
     }
 
     fn new_internal(manager: Arc<MetadataManager>, code: &'a str) -> Self {
-        Self { manager, code, skip_extraction: true }
+        Self {
+            manager,
+            code,
+            skip_extraction: true,
+        }
     }
 
     pub fn parse(&self) -> ParseResult {
@@ -247,24 +268,24 @@ impl<'a> ForgeScriptParser<'a> {
         let mut code_to_parse = String::new();
         let mut offsets: Vec<usize> = Vec::new();
         let mut block_count = 0;
-        
+
         let bytes = self.code.as_bytes();
         let mut i = 0;
-        
+
         while i < self.code.len() {
             // Look for "code:" pattern
-            if i + 5 <= self.code.len() && &self.code[i..i+5] == "code:" {
+            if i + 5 <= self.code.len() && &self.code[i..i + 5] == "code:" {
                 // Skip "code:" and any whitespace
                 let mut j = i + 5;
                 while j < bytes.len() && bytes[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                
+
                 // Check for opening backtick
                 if j < bytes.len() && bytes[j] == b'`' {
                     j += 1; // Skip the opening backtick
                     let content_start = j;
-                    
+
                     // Find the matching closing backtick, respecting escapes
                     let mut found_end = false;
                     while j < bytes.len() {
@@ -273,21 +294,20 @@ impl<'a> ForgeScriptParser<'a> {
                             j += 2;
                             continue;
                         }
-                        
+
                         if bytes[j] == b'`' {
                             // Found unescaped closing backtick
                             found_end = true;
                             break;
                         }
-                        
+
                         j += 1;
                     }
-                    
+
                     if found_end {
                         block_count += 1;
                         let content = &self.code[content_start..j];
                         offsets.push(content_start);
-                        eprintln!("[Parser] Found code block #{}: {} chars at offset {}", block_count, content.len(), content_start);
                         code_to_parse.push_str(content);
                         code_to_parse.push('\n');
                         i = j + 1; // Move past the closing backtick
@@ -295,18 +315,15 @@ impl<'a> ForgeScriptParser<'a> {
                     }
                 }
             }
-            
+
             i += 1;
         }
-        
+
         if block_count > 0 {
-            eprintln!("[Parser] Total code blocks found: {}", block_count);
-            eprintln!("[Parser] Total content to parse: {} chars", code_to_parse.len());
-            
             // Parse only the extracted code block contents
             let parser = ForgeScriptParser::new_internal(self.manager.clone(), &code_to_parse);
             let mut result = parser.parse();
-            
+
             // Adjust positions back to original file coordinates
             if !offsets.is_empty() {
                 let offset = offsets[0]; // Use first block's offset for now
@@ -319,7 +336,7 @@ impl<'a> ForgeScriptParser<'a> {
                     func.span.1 += offset;
                 }
             }
-            
+
             return result;
         }
         ParseResult {
@@ -339,11 +356,32 @@ impl<'a> ForgeScriptParser<'a> {
 
         while let Some((idx, c)) = iter.next() {
             // Handle backslash escaping
-            if c == '\\' {
-                if let Some(&(_next_idx, next_c)) = iter.peek() {
-                    // Check for backtick escape: \`
-                    if next_c == '`' {
-                        // Push text before the backslash
+            if c == '\\'
+                && let Some(&(_next_idx, next_c)) = iter.peek()
+            {
+                // Check for backtick escape: \`
+                if next_c == '`' {
+                    // Push text before the backslash
+                    if last_idx < idx {
+                        tokens.push(Token {
+                            kind: TokenKind::Text,
+                            text: Box::leak(self.code[last_idx..idx].to_string().into_boxed_str()),
+                            start: last_idx,
+                            end: idx,
+                        });
+                    }
+                    iter.next(); // consume the backtick
+                    last_idx = idx; // Start from backslash
+                    continue;
+                }
+                // Check for double backslash escapes: \\$, \\;, \\[, \\]
+                if next_c == '\\' {
+                    // Look ahead one more character
+                    iter.next(); // consume second backslash
+                    if let Some(&(_third_idx, third_c)) = iter.peek()
+                        && matches!(third_c, '$' | '[' | ']' | ';' | '\\')
+                    {
+                        // Push text before the first backslash
                         if last_idx < idx {
                             tokens.push(Token {
                                 kind: TokenKind::Text,
@@ -354,34 +392,11 @@ impl<'a> ForgeScriptParser<'a> {
                                 end: idx,
                             });
                         }
-                        iter.next(); // consume the backtick
-                        last_idx = idx; // Start from backslash
+                        iter.next(); // consume the escaped character
+                        last_idx = idx; // Start from first backslash
                         continue;
                     }
-                    // Check for double backslash escapes: \\$, \\;, \\[, \\]
-                    if next_c == '\\' {
-                        // Look ahead one more character
-                        iter.next(); // consume second backslash
-                        if let Some(&(_third_idx, third_c)) = iter.peek() {
-                            if matches!(third_c, '$' | '[' | ']' | ';' | '\\') {
-                                // Push text before the first backslash
-                                if last_idx < idx {
-                                    tokens.push(Token {
-                                        kind: TokenKind::Text,
-                                        text: Box::leak(
-                                            self.code[last_idx..idx].to_string().into_boxed_str(),
-                                        ),
-                                        start: last_idx,
-                                        end: idx,
-                                    });
-                                }
-                                iter.next(); // consume the escaped character
-                                last_idx = idx; // Start from first backslash
-                                continue;
-                            }
-                        }
-                        continue; // Skip the double backslash if not escaping anything
-                    }
+                    continue; // Skip the double backslash if not escaping anything
                 }
             }
 
@@ -706,7 +721,7 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
 
     while i < code.len() {
         let c = bytes[i] as char;
-        
+
         // Check if this character is escaped by a backslash
         let is_esc = i > 0 && {
             let mut backslash_count = 0;
@@ -723,12 +738,13 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
         };
 
         // Check if we're at the start of an escape function
-        if !is_esc && c == '$' {
-            if let Some(escape_end) = find_escape_function_end(code, i) {
-                // Skip the entire escape function including its closing bracket
-                i = escape_end + 1;
-                continue;
-            }
+        if !is_esc
+            && c == '$'
+            && let Some(escape_end) = find_escape_function_end(code, i)
+        {
+            // Skip the entire escape function including its closing bracket
+            i = escape_end + 1;
+            continue;
         }
 
         if !is_esc {
@@ -741,10 +757,10 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
                 }
             }
         }
-        
+
         i += 1;
     }
-    
+
     None
 }
 
@@ -763,7 +779,7 @@ fn parse_nested_args(
 
     while idx < input.len() {
         let c = bytes[idx] as char;
-        
+
         // Check if we're at an escape function
         if c == '$' && depth == 0 {
             // Check if this $ starts an escape function
@@ -777,7 +793,7 @@ fn parse_nested_args(
                 continue;
             }
         }
-        
+
         match c {
             '\\' => {
                 // Check for backtick escape: \`
@@ -840,7 +856,7 @@ fn parse_nested_args(
                 idx += 1;
             }
         }
-        
+
         if c != ';' || depth != 0 {
             is_start_of_arg = false;
         }
@@ -891,6 +907,7 @@ fn parse_single_arg(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_arg_count(
     name: &str,
     total: usize,

@@ -1,13 +1,31 @@
+//! # LSP Server Implementation
+//!
+//! Implements the `LanguageServer` trait from Tower LSP for ForgeScript.
+//!
+//! Provides:
+//! - Document synchronization (full sync mode)
+//! - Hover tooltips with function documentation
+//! - Auto-completion with modifier support (`$!`, `$.`)
+//! - Signature help with parameter tracking
+//! - Semantic token highlighting
+//! - Real-time diagnostics
+
 use crate::diagnostics::publish_diagnostics;
 use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
 use crate::utils::{load_forge_config_full, spawn_log};
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tower_lsp::{Client, LanguageServer, async_trait, jsonrpc::Result, lsp_types::*};
+
+/// ForgeScript Language Server
+///
+/// Maintains shared state for document content, parse results, and function metadata.
+/// All state is wrapped in Arc<RwLock<>> for thread-safe concurrent access.
 
 #[derive(Debug)]
 pub struct ForgeScriptServer {
@@ -68,7 +86,7 @@ impl LanguageServer for ForgeScriptServer {
                 .into_iter()
                 .filter_map(|f| f.uri.to_file_path().ok())
                 .collect::<Vec<_>>();
-            *self.workspace_folders.write().unwrap() = paths.clone();
+            (*self.workspace_folders.write().unwrap()).clone_from(&paths);
 
             if let Some(config) = load_forge_config_full(&paths) {
                 let urls = config.urls.clone();
@@ -81,12 +99,12 @@ impl LanguageServer for ForgeScriptServer {
                     .expect("Failed to load metadata sources");
 
                 // Load custom functions from config if available
-                if let Some(custom_funcs) = config.custom_functions {
-                    if !custom_funcs.is_empty() {
-                        manager
-                            .add_custom_functions(custom_funcs)
-                            .expect("Failed to add custom functions");
-                    }
+                if let Some(custom_funcs) = config.custom_functions
+                    && !custom_funcs.is_empty()
+                {
+                    manager
+                        .add_custom_functions(custom_funcs)
+                        .expect("Failed to add custom functions");
                 }
 
                 *self.manager.write().unwrap() = Arc::new(manager);
@@ -118,7 +136,7 @@ impl LanguageServer for ForgeScriptServer {
                         " ".into(),
                     ]),
                     retrigger_characters: Some(vec![",".into(), " ".into()]),
-                    work_done_progress_options: Default::default(),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
                 }),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -154,7 +172,7 @@ impl LanguageServer for ForgeScriptServer {
         self.client
             .log_message(
                 MessageType::INFO,
-                format!("[INFO] ForgeLSP initialized with {} functions", count),
+                format!("[INFO] ForgeLSP initialized with {count} functions"),
             )
             .await;
     }
@@ -288,7 +306,6 @@ impl LanguageServer for ForgeScriptServer {
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let start = std::time::Instant::now();
-        use regex::Regex;
 
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
@@ -401,7 +418,7 @@ impl LanguageServer for ForgeScriptServer {
 
         // Look up metadata and return signature help
         let mgr = self.manager.read().unwrap().clone();
-        let lookup = format!("${}", func_name);
+        let lookup = format!("${func_name}");
 
         if let Some(func) = mgr.get(&lookup) {
             let args = func.args.clone().unwrap_or_default();

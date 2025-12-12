@@ -1,10 +1,20 @@
+//! # Hover Provider Module
+//!
+//! Implements LSP hover functionality for ForgeScript functions.
+//! Provides rich markdown tooltips with function signatures, descriptions, and examples
+//! when users hover over function names in their code.
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::ForgeScriptServer;
 use crate::utils::spawn_log;
 
-/// Check if a character at the given byte index is escaped by a backslash
+/// Check if a character at the given byte index is escaped by a backslash.
+///
+/// Counts consecutive backslashes before the character:
+/// - Odd number of backslashes → character is escaped
+/// - Even number of backslashes → character is NOT escaped
 fn is_escaped(text: &str, byte_idx: usize) -> bool {
     if byte_idx == 0 {
         return false;
@@ -160,14 +170,14 @@ pub async fn handle_hover(
             md.push('\n');
         }
 
-        if let Some(exs) = func_examples {
-            if !exs.is_empty() {
-                md.push_str("\n**Examples:**\n");
-                for ex in exs.iter().take(2) {
-                    md.push_str("\n```forgescript\n");
-                    md.push_str(ex);
-                    md.push_str("\n```\n");
-                }
+        if let Some(exs) = func_examples
+            && !exs.is_empty()
+        {
+            md.push_str("\n**Examples:**\n");
+            for ex in exs.iter().take(2) {
+                md.push_str("\n```forgescript\n");
+                md.push_str(ex);
+                md.push_str("\n```\n");
             }
         }
 

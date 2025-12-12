@@ -1,3 +1,10 @@
+//! # Utility Functions Module
+//!
+//! Provides helper functions for:
+//! - Loading and parsing `forgeconfig.json` configuration files
+//! - Transforming GitHub shorthand URLs to raw githubusercontent URLs
+//! - Asynchronous LSP client logging
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::fs;
@@ -5,9 +12,17 @@ use std::path::PathBuf;
 use tower_lsp::Client;
 use tower_lsp::lsp_types::MessageType;
 
+/// Spawns an asynchronous task to log a message to the LSP client.
+///
+/// This is non-blocking and errors are ignored (logging failures don't affect functionality).
+///
+/// # Arguments
+/// * `client` - LSP client to send the log message to
+/// * `ty` - Message type (INFO, WARNING, ERROR, LOG)
+/// * `msg` - Message content
 pub fn spawn_log(client: Client, ty: MessageType, msg: String) {
     tokio::spawn(async move {
-        let _ = client.log_message(ty, msg).await;
+        let () = client.log_message(ty, msg).await;
     });
 }
 
@@ -61,18 +76,12 @@ pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<ForgeConf
             continue;
         }
 
-        let data = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(_) => {
-                continue;
-            }
+        let Ok(data) = fs::read_to_string(&path) else {
+            continue;
         };
 
-        let mut raw = match serde_json::from_str::<ForgeConfig>(&data) {
-            Ok(cfg) => cfg,
-            Err(_) => {
-                continue;
-            }
+        let Ok(mut raw) = serde_json::from_str::<ForgeConfig>(&data) else {
+            continue;
         };
 
         // Transform shorthand URLs into fully-qualified URLs
@@ -91,22 +100,24 @@ pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<ForgeConf
 ///   github:owner/repo/path/to/file.json
 ///
 /// Output:
-///   https://raw.githubusercontent.com/owner/repo/<branch>/path/to/file.json
+///   <https://raw.githubusercontent.com/owner/repo/<branch>/path/to/file.json>
 fn resolve_github_shorthand(input: String) -> String {
     // Only rewrite GitHub-style keys. Leave normal URLs untouched.
     if !input.starts_with("github:") {
         return input;
     }
 
+    // Remove the "github:" prefix
     let trimmed = &input["github:".len()..];
 
-    // Split branch if provided
+    // Split branch if provided (default to "main" if not specified)
     let (path, branch) = match trimmed.split_once('#') {
         Some((p, b)) => (p, b),
         None => (trimmed, "main"), // default branch
     };
 
     // Parse owner/repo/path structure
+    // Expected format: owner/repo or owner/repo/custom/path
     let parts: Vec<&str> = path.split('/').collect();
 
     if parts.len() < 2 {
@@ -117,15 +128,13 @@ fn resolve_github_shorthand(input: String) -> String {
     let owner = parts[0];
     let repo = parts[1];
 
-    // If there's a file path specified, use it; otherwise default to forge.json
+    // If there's a file path specified, use it; otherwise default to metadata/functions.json
     let file_path = if parts.len() > 2 {
         parts[2..].join("/")
     } else {
         "metadata/functions.json".to_string()
     };
 
-    format!(
-        "https://raw.githubusercontent.com/{}/{}/{}/{}",
-        owner, repo, branch, file_path
-    )
+    // Construct the raw.githubusercontent.com URL
+    format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}")
 }
