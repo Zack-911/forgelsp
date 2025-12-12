@@ -122,6 +122,11 @@ fn is_escaped(code: &str, byte_idx: usize) -> bool {
         return false;
     }
 
+    // Validate that byte_idx is on a character boundary
+    if !code.is_char_boundary(byte_idx) {
+        return false;
+    }
+
     let bytes = code.as_bytes();
     let c = bytes[byte_idx];
 
@@ -754,11 +759,9 @@ fn find_matching_brace(code: &str, open_idx: usize) -> Option<usize> {
 fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
     let mut depth = 0;
     let bytes = code.as_bytes();
-    let mut i = open_idx;
 
-    while i < code.len() {
-        let c = bytes[i] as char;
-
+    // Use char_indices to ensure we're always on UTF-8 character boundaries
+    for (i, c) in code.char_indices().skip_while(|&(idx, _)| idx < open_idx) {
         // Check if this character is escaped by a backslash
         let is_esc = i > 0 && {
             let mut backslash_count = 0;
@@ -775,12 +778,8 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
         };
 
         // Check if we're at the start of an escape function
-        if !is_esc
-            && c == '$'
-            && let Some(escape_end) = find_escape_function_end(code, i)
-        {
-            // Skip the entire escape function including its closing bracket
-            i = escape_end + 1;
+        if !is_esc && c == '$' && find_escape_function_end(code, i).is_some() {
+            // Skip the entire escape function - the for loop will continue past it
             continue;
         }
 
@@ -794,8 +793,6 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
                 }
             }
         }
-
-        i += 1;
     }
 
     None
@@ -811,21 +808,27 @@ fn parse_nested_args(
     let mut seen_separator = false;
     let mut first_char_escaped = false;
     let mut is_start_of_arg = true;
-    let bytes = input.as_bytes();
-    let mut idx = 0;
 
-    while idx < input.len() {
-        let c = bytes[idx] as char;
+    // Collect char positions for UTF-8 safe iteration
+    let char_positions: Vec<(usize, char)> = input.char_indices().collect();
+    let mut char_idx = 0;
+
+    while char_idx < char_positions.len() {
+        let (byte_idx, c) = char_positions[char_idx];
 
         // Check if we're at an escape function
         if c == '$' && depth == 0 {
             // Check if this $ starts an escape function
-            let remaining = &input[idx..];
+            let remaining = &input[byte_idx..];
             if let Some(escape_end_relative) = find_escape_function_end(remaining, 0) {
                 // Copy the entire escape function to current including the $esc[...] structure
                 let escape_function = &remaining[..=escape_end_relative];
                 current.push_str(escape_function);
-                idx += escape_end_relative + 1;
+                // Skip ahead to after the escape function
+                let target_byte = byte_idx + escape_end_relative + 1;
+                while char_idx < char_positions.len() && char_positions[char_idx].0 < target_byte {
+                    char_idx += 1;
+                }
                 is_start_of_arg = false;
                 continue;
             }
@@ -834,40 +837,40 @@ fn parse_nested_args(
         match c {
             '\\' => {
                 // Check for backtick escape: \`
-                if idx + 1 < input.len() && bytes[idx + 1] == b'`' {
+                if char_idx + 1 < char_positions.len() && char_positions[char_idx + 1].1 == '`' {
                     current.push('`');
-                    idx += 2;
+                    char_idx += 2;
                     is_start_of_arg = false;
                     continue;
                 }
                 // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
-                if idx + 2 < input.len() && bytes[idx + 1] == b'\\' {
-                    let third = bytes[idx + 2] as char;
+                if char_idx + 2 < char_positions.len() && char_positions[char_idx + 1].1 == '\\' {
+                    let third = char_positions[char_idx + 2].1;
                     if matches!(third, '$' | '[' | ']' | ';' | '\\') {
                         if is_start_of_arg && third == '$' {
                             first_char_escaped = true;
                         }
                         current.push(third);
-                        idx += 3; // Skip both backslashes and escaped char
+                        char_idx += 3; // Skip both backslashes and escaped char
                         is_start_of_arg = false;
                         continue;
                     }
                 }
                 // Not a recognized escape, keep the backslash
                 current.push('\\');
-                idx += 1;
+                char_idx += 1;
             }
             '[' => {
                 depth += 1;
                 current.push(c);
-                idx += 1;
+                char_idx += 1;
             }
             ']' => {
                 if depth > 0 {
                     depth -= 1;
                 }
                 current.push(c);
-                idx += 1;
+                char_idx += 1;
             }
             ';' if depth == 0 => {
                 seen_separator = true;
@@ -886,11 +889,11 @@ fn parse_nested_args(
                 current.clear();
                 first_char_escaped = false;
                 is_start_of_arg = true;
-                idx += 1;
+                char_idx += 1;
             }
             _ => {
                 current.push(c);
-                idx += 1;
+                char_idx += 1;
             }
         }
 

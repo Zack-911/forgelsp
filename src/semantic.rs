@@ -152,24 +152,30 @@ fn extract_tokens_from_code(
     let mut found = Vec::new();
     let bytes = code.as_bytes();
     let mut function_color_index = 0u32;
-    let mut i = 0;
 
-    while i < bytes.len() {
-        let c = bytes[i];
+    // Collect char indices for safe UTF-8 iteration
+    let char_positions: Vec<(usize, char)> = code.char_indices().collect();
+    let mut idx = 0;
+
+    while idx < char_positions.len() {
+        let (i, c) = char_positions[idx];
 
         // Check for functions
-        if c == b'$' && !is_char_escaped(bytes, i) {
+        if c == '$' && !is_char_escaped(bytes, i) {
             // Check for $c[...] (comment)
-            if i + 1 < bytes.len()
-                && bytes[i + 1] == b'c'
-                && i + 2 < bytes.len()
-                && bytes[i + 2] == b'['
+            if idx + 1 < char_positions.len()
+                && char_positions[idx + 1].1 == 'c'
+                && idx + 2 < char_positions.len()
+                && char_positions[idx + 2].1 == '['
             {
                 // Found comment function
-                if let Some(end_idx) = find_matching_bracket_raw(bytes, i + 2) {
+                if let Some(end_idx) = find_matching_bracket_raw(bytes, char_positions[idx + 2].0) {
                     // Highlight entire $c[...] as KEYWORD (comment)
                     found.push((i + code_start, end_idx + 1 + code_start, 5));
-                    i = end_idx + 1;
+                    // Skip to after the closing bracket
+                    while idx < char_positions.len() && char_positions[idx].0 <= end_idx {
+                        idx += 1;
+                    }
                     continue;
                 }
             }
@@ -177,11 +183,12 @@ fn extract_tokens_from_code(
             // Check for $esc[...] or $escapeCode[...] (escape functions)
             if let Some(esc_end) = check_escape_function(bytes, i) {
                 // Highlight function name
-                let name_end = i + if bytes[i + 1..].starts_with(b"esc[") {
-                    4
-                } else {
-                    11
-                };
+                let name_end = i
+                    + if bytes.get(i + 1..).and_then(|b| b.get(..4)) == Some(b"esc[") {
+                        4
+                    } else {
+                        11
+                    };
                 found.push((i + code_start, name_end + code_start, 0));
                 // Highlight content as STRING
                 if name_end < esc_end {
@@ -189,24 +196,35 @@ fn extract_tokens_from_code(
                 }
                 // Highlight closing bracket
                 found.push((esc_end + code_start, esc_end + 1 + code_start, 0));
-                i = esc_end + 1;
+                // Skip to after the escape function
+                while idx < char_positions.len() && char_positions[idx].0 <= esc_end {
+                    idx += 1;
+                }
                 continue;
             }
 
             // Try incremental matching against metadata
             let mut best_match_len = 0;
-            let mut j = i + 1;
+            let mut best_match_char_count = 0;
+            let mut j = idx + 1;
 
             // Skip modifiers
-            while j < bytes.len() && (bytes[j] == b'!' || bytes[j] == b'#') {
+            while j < char_positions.len()
+                && (char_positions[j].1 == '!' || char_positions[j].1 == '#')
+            {
                 j += 1;
             }
 
             // Try matching character by character
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-                let candidate = &code[i..=j];
-                if manager.get(candidate).is_some() {
-                    best_match_len = j - i + 1;
+            while j < char_positions.len()
+                && (char_positions[j].1.is_alphanumeric() || char_positions[j].1 == '_')
+            {
+                let end_byte_idx = char_positions[j].0 + char_positions[j].1.len_utf8();
+                if let Some(candidate) = code.get(i..end_byte_idx) {
+                    if manager.get(candidate).is_some() {
+                        best_match_len = end_byte_idx - i;
+                        best_match_char_count = j - idx + 1;
+                    }
                 }
                 j += 1;
             }
@@ -221,7 +239,7 @@ fn extract_tokens_from_code(
                     0
                 };
                 found.push((i + code_start, i + best_match_len + code_start, token_type));
-                i += best_match_len;
+                idx += best_match_char_count;
                 continue;
             }
         }
@@ -229,31 +247,42 @@ fn extract_tokens_from_code(
         // Check for numbers
         if c.is_ascii_digit() {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                i += 1;
+            let mut j = idx;
+            while j < char_positions.len()
+                && (char_positions[j].1.is_ascii_digit() || char_positions[j].1 == '.')
+            {
+                j += 1;
             }
-            found.push((start + code_start, i + code_start, 2));
+            let end = if j < char_positions.len() {
+                char_positions[j].0
+            } else {
+                code.len()
+            };
+            found.push((start + code_start, end + code_start, 2));
+            idx = j;
             continue;
         }
 
-        // Check for booleans
-        if i + 4 <= bytes.len() && &code[i..i + 4] == "true" {
-            found.push((i + code_start, i + 4 + code_start, 1));
-            i += 4;
-            continue;
-        }
-        if i + 5 <= bytes.len() && &code[i..i + 5] == "false" {
-            found.push((i + code_start, i + 5 + code_start, 1));
-            i += 5;
-            continue;
+        // Check for booleans - use safe slicing with get()
+        if let Some(slice) = code.get(i..) {
+            if slice.starts_with("true") {
+                found.push((i + code_start, i + 4 + code_start, 1));
+                idx += 4;
+                continue;
+            }
+            if slice.starts_with("false") {
+                found.push((i + code_start, i + 5 + code_start, 1));
+                idx += 5;
+                continue;
+            }
         }
 
         // Check for semicolons
-        if c == b';' && !is_char_escaped(bytes, i) {
+        if c == ';' && !is_char_escaped(bytes, i) {
             found.push((i + code_start, i + 1 + code_start, 1));
         }
 
-        i += 1;
+        idx += 1;
     }
 
     found.sort_by_key(|(s, _, _)| *s);
