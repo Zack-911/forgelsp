@@ -1,6 +1,6 @@
 # AI Assistant Guidelines
 
-This document provides specific guidance for AI assistants (like me!) when working with the ForgeLSP codebase.
+This document provides specific guidance for AI assistants when working with the ForgeLSP codebase.
 
 ## Quick Reference
 
@@ -302,6 +302,7 @@ Before committing code:
 
 ## Remember
 
+These Instructions Must Never Be Ignored:
 - **Safety First:** Rust's type system is your friend
 - **Explicit > Implicit:** Clear code over clever code
 - **Document Why:** Code shows what, comments show why
@@ -338,5 +339,3 @@ for alias in &aliases {
     trie.insert(alias, Arc::new(func.clone()));
 }
 ```
-
-Happy coding! 🦀
