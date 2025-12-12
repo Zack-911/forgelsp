@@ -2,7 +2,6 @@ use crate::metadata::{Function, MetadataManager};
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::sync::Arc;
-use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -72,56 +71,99 @@ pub enum ParsedArg {
     Function { func: Box<ParsedFunction> },
 }
 
-/// Check if a character at the given byte index is escaped by a backslash.
-/// Counts consecutive backslashes before the position. If odd, the character is escaped.
+/// Check if a character at the given byte index is escaped.
+/// For backtick: 1 backslash escapes it (\`)
+/// For special chars ($, ;, [, ]): 2 backslashes escape it (\\$, \\;, etc.)
 fn is_escaped(code: &str, byte_idx: usize) -> bool {
     if byte_idx == 0 {
         return false;
     }
 
     let bytes = code.as_bytes();
-    let mut backslash_count = 0;
-    let mut pos = byte_idx;
-
-    while pos > 0 {
-        pos -= 1;
-        if bytes[pos] == b'\\' {
-            backslash_count += 1;
-        } else {
-            break;
+    let c = bytes[byte_idx];
+    
+    // For backtick, check if there's exactly 1 backslash before it
+    if c == b'`' {
+        if byte_idx >= 1 && bytes[byte_idx - 1] == b'\\' {
+            // Check if the backslash itself is escaped (even number of backslashes before it)
+            let mut backslash_count = 1;
+            let mut pos = byte_idx - 1;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            // If odd number of total backslashes, the backtick is escaped
+            return backslash_count % 2 == 1;
         }
+        return false;
     }
-
-    // Odd number of backslashes means the character is escaped
-    backslash_count % 2 == 1
+    
+    // For special chars ($, ;, [, ]), check if there are exactly 2 backslashes before it
+    if matches!(c, b'$' | b';' | b'[' | b']') {
+        if byte_idx >= 2 && bytes[byte_idx - 1] == b'\\' && bytes[byte_idx - 2] == b'\\' {
+            // Check if the backslashes themselves are escaped
+            let mut backslash_count = 2;
+            let mut pos = byte_idx - 2;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            // If exactly 2 backslashes (even total), the char is escaped
+            return backslash_count == 2 || backslash_count % 2 == 0;
+        }
+        return false;
+    }
+    
+    false
 }
 
 /// Process escape sequences in a string, returning the unescaped version.
-/// Handles: \$ -> $, \[ -> [, \] -> ], \; -> ;, \\ -> \
+/// Handles: \` -> `, \\$ -> $, \\[ -> [, \\] -> ], \\; -> ;, \\\\ -> \\
 #[allow(dead_code)]
 pub fn unescape_string(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(&next) = chars.peek() {
-                match next {
-                    '$' | '[' | ']' | ';' | '\\' => {
-                        result.push(next);
-                        chars.next();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if i + 1 < bytes.len() {
+                let next = bytes[i + 1];
+                // Check for backtick escape: \`
+                if next == b'`' {
+                    result.push('`');
+                    i += 2;
+                    continue;
+                }
+                // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
+                if i + 2 < bytes.len() && next == b'\\' {
+                    let third = bytes[i + 2];
+                    if matches!(third, b'$' | b';' | b'[' | b']') {
+                        result.push(third as char);
+                        i += 3;
+                        continue;
                     }
-                    _ => {
-                        // Keep the backslash if it's not escaping a special char
-                        result.push(c);
+                    if third == b'\\' {
+                        result.push('\\');
+                        i += 3;
+                        continue;
                     }
                 }
-            } else {
-                // Trailing backslash
-                result.push(c);
             }
+            // Keep the backslash if it's not a recognized escape
+            result.push('\\');
+            i += 1;
         } else {
-            result.push(c);
+            result.push(bytes[i] as char);
+            i += 1;
         }
     }
 
@@ -131,7 +173,52 @@ pub fn unescape_string(input: &str) -> String {
 /// Check if the function name is an escape function ($esc or $escape)
 fn is_escape_function(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower == "esc" || lower == "escape"
+    lower == "esc" || lower == "escape" || lower == "escapecode"
+}
+
+/// Detect if we're at the start of an escape function and return its end position.
+/// Returns None if not at an escape function.
+/// This helps bracket matchers skip escape function contents entirely.
+fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
+    let bytes = code.as_bytes();
+    
+    // Check if we're at a $ that's not escaped
+    if dollar_idx >= code.len() || bytes[dollar_idx] != b'$' {
+        return None;
+    }
+    
+    if is_escaped(code, dollar_idx) {
+        return None;
+    }
+    
+    // Skip $ and any modifiers (!, #)
+    let mut pos = dollar_idx + 1;
+    while pos < bytes.len() && (bytes[pos] == b'!' || bytes[pos] == b'#') {
+        pos += 1;
+    }
+    
+    // Read function name
+    let name_start = pos;
+    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+        pos += 1;
+    }
+    
+    if pos == name_start {
+        return None; // No function name
+    }
+    
+    let name = &code[name_start..pos];
+    if !is_escape_function(name) {
+        return None; // Not an escape function
+    }
+    
+    // Check for opening bracket
+    if pos >= bytes.len() || bytes[pos] != b'[' {
+        return None; // Escape function must have brackets
+    }
+    
+    // Find the matching bracket using raw matching (no escape handling)
+    find_matching_bracket_raw(code, pos)
 }
 
 pub struct ForgeScriptParser<'a> {
@@ -155,27 +242,64 @@ impl<'a> ForgeScriptParser<'a> {
             return self.parse_internal();
         }
 
-        // Extract code blocks using regex - match code: ` ... ` pattern (template literals)
-        let code_block_regex = Regex::new(r"code:\s*`([\s\S]*?)`").unwrap();
+        // Manually extract code blocks, handling escaped backticks properly
+        // Pattern: code: ` ... ` where backticks can be escaped with \`
+        let mut code_to_parse = String::new();
+        let mut offsets: Vec<usize> = Vec::new();
+        let mut block_count = 0;
         
-        // Check if there are any code blocks
-        if code_block_regex.is_match(self.code) {
-            // Extract all code block contents with their original offsets
-            let mut code_to_parse = String::new();
-            let mut offsets: Vec<usize> = Vec::new();
-            let mut block_count = 0;
-            
-            for cap in code_block_regex.captures_iter(self.code) {
-                if let Some(content) = cap.get(1) {
-                    block_count += 1;
-                    let offset = content.start();
-                    offsets.push(offset);
-                    eprintln!("[Parser] Found code block #{}: {} chars at offset {}", block_count, content.as_str().len(), offset);
-                    code_to_parse.push_str(content.as_str());
-                    code_to_parse.push('\n');
+        let bytes = self.code.as_bytes();
+        let mut i = 0;
+        
+        while i < self.code.len() {
+            // Look for "code:" pattern
+            if i + 5 <= self.code.len() && &self.code[i..i+5] == "code:" {
+                // Skip "code:" and any whitespace
+                let mut j = i + 5;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                
+                // Check for opening backtick
+                if j < bytes.len() && bytes[j] == b'`' {
+                    j += 1; // Skip the opening backtick
+                    let content_start = j;
+                    
+                    // Find the matching closing backtick, respecting escapes
+                    let mut found_end = false;
+                    while j < bytes.len() {
+                        if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                            // Skip backslash and the next character (escaped)
+                            j += 2;
+                            continue;
+                        }
+                        
+                        if bytes[j] == b'`' {
+                            // Found unescaped closing backtick
+                            found_end = true;
+                            break;
+                        }
+                        
+                        j += 1;
+                    }
+                    
+                    if found_end {
+                        block_count += 1;
+                        let content = &self.code[content_start..j];
+                        offsets.push(content_start);
+                        eprintln!("[Parser] Found code block #{}: {} chars at offset {}", block_count, content.len(), content_start);
+                        code_to_parse.push_str(content);
+                        code_to_parse.push('\n');
+                        i = j + 1; // Move past the closing backtick
+                        continue;
+                    }
                 }
             }
             
+            i += 1;
+        }
+        
+        if block_count > 0 {
             eprintln!("[Parser] Total code blocks found: {}", block_count);
             eprintln!("[Parser] Total content to parse: {} chars", code_to_parse.len());
             
@@ -217,27 +341,46 @@ impl<'a> ForgeScriptParser<'a> {
             // Handle backslash escaping
             if c == '\\' {
                 if let Some(&(_next_idx, next_c)) = iter.peek() {
-                    match next_c {
-                        '$' | '[' | ']' | ';' | '\\' => {
-                            // Push text before the backslash
-                            if last_idx < idx {
-                                tokens.push(Token {
-                                    kind: TokenKind::Text,
-                                    text: Box::leak(
-                                        self.code[last_idx..idx].to_string().into_boxed_str(),
-                                    ),
-                                    start: last_idx,
-                                    end: idx,
-                                });
+                    // Check for backtick escape: \`
+                    if next_c == '`' {
+                        // Push text before the backslash
+                        if last_idx < idx {
+                            tokens.push(Token {
+                                kind: TokenKind::Text,
+                                text: Box::leak(
+                                    self.code[last_idx..idx].to_string().into_boxed_str(),
+                                ),
+                                start: last_idx,
+                                end: idx,
+                            });
+                        }
+                        iter.next(); // consume the backtick
+                        last_idx = idx; // Start from backslash
+                        continue;
+                    }
+                    // Check for double backslash escapes: \\$, \\;, \\[, \\]
+                    if next_c == '\\' {
+                        // Look ahead one more character
+                        iter.next(); // consume second backslash
+                        if let Some(&(_third_idx, third_c)) = iter.peek() {
+                            if matches!(third_c, '$' | '[' | ']' | ';' | '\\') {
+                                // Push text before the first backslash
+                                if last_idx < idx {
+                                    tokens.push(Token {
+                                        kind: TokenKind::Text,
+                                        text: Box::leak(
+                                            self.code[last_idx..idx].to_string().into_boxed_str(),
+                                        ),
+                                        start: last_idx,
+                                        end: idx,
+                                    });
+                                }
+                                iter.next(); // consume the escaped character
+                                last_idx = idx; // Start from first backslash
+                                continue;
                             }
-                            // Skip the backslash, the escaped char will be handled as regular text
-                            iter.next(); // consume the escaped character
-                            last_idx = idx; // Start from backslash so \$ becomes part of text
-                            continue;
                         }
-                        _ => {
-                            // Not a special escape, treat backslash as regular text
-                        }
+                        continue; // Skip the double backslash if not escaping anything
                     }
                 }
             }
@@ -555,12 +698,16 @@ fn find_matching_brace(code: &str, open_idx: usize) -> Option<usize> {
 
 /// Find matching bracket respecting backslash escapes.
 /// Escaped brackets (\[ and \]) are not counted.
+/// Also skips over escape functions ($esc, $escape, $escapeCode) entirely.
 fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
     let mut depth = 0;
     let bytes = code.as_bytes();
+    let mut i = open_idx;
 
-    for (i, c) in code.char_indices().skip_while(|&(i, _)| i < open_idx) {
-        // Check if this character is escaped
+    while i < code.len() {
+        let c = bytes[i] as char;
+        
+        // Check if this character is escaped by a backslash
         let is_esc = i > 0 && {
             let mut backslash_count = 0;
             let mut pos = i;
@@ -575,6 +722,15 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
             backslash_count % 2 == 1
         };
 
+        // Check if we're at the start of an escape function
+        if !is_esc && c == '$' {
+            if let Some(escape_end) = find_escape_function_end(code, i) {
+                // Skip the entire escape function including its closing bracket
+                i = escape_end + 1;
+                continue;
+            }
+        }
+
         if !is_esc {
             if c == '[' {
                 depth += 1;
@@ -585,7 +741,10 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
                 }
             }
         }
+        
+        i += 1;
     }
+    
     None
 }
 
@@ -597,39 +756,65 @@ fn parse_nested_args(
     let mut current = String::new();
     let mut depth = 0;
     let mut seen_separator = false;
-    let mut iter = input.char_indices().peekable();
     let mut first_char_escaped = false;
     let mut is_start_of_arg = true;
+    let bytes = input.as_bytes();
+    let mut idx = 0;
 
-    while let Some((_, c)) = iter.next() {
+    while idx < input.len() {
+        let c = bytes[idx] as char;
+        
+        // Check if we're at an escape function
+        if c == '$' && depth == 0 {
+            // Check if this $ starts an escape function
+            let remaining = &input[idx..];
+            if let Some(escape_end_relative) = find_escape_function_end(remaining, 0) {
+                // Copy the entire escape function to current including the $esc[...] structure
+                let escape_function = &remaining[..=escape_end_relative];
+                current.push_str(escape_function);
+                idx += escape_end_relative + 1;
+                is_start_of_arg = false;
+                continue;
+            }
+        }
+        
         match c {
             '\\' => {
-                if let Some(&(_, next_c)) = iter.peek() {
-                    match next_c {
-                        '$' | '[' | ']' | ';' | '\\' => {
-                            if is_start_of_arg && next_c == '$' {
-                                first_char_escaped = true;
-                            }
-                            current.push(next_c);
-                            iter.next();
-                        }
-                        _ => {
-                            current.push('\\');
-                        }
-                    }
-                } else {
-                    current.push('\\');
+                // Check for backtick escape: \`
+                if idx + 1 < input.len() && bytes[idx + 1] == b'`' {
+                    current.push('`');
+                    idx += 2;
+                    is_start_of_arg = false;
+                    continue;
                 }
+                // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
+                if idx + 2 < input.len() && bytes[idx + 1] == b'\\' {
+                    let third = bytes[idx + 2] as char;
+                    if matches!(third, '$' | '[' | ']' | ';' | '\\') {
+                        if is_start_of_arg && third == '$' {
+                            first_char_escaped = true;
+                        }
+                        current.push(third);
+                        idx += 3; // Skip both backslashes and escaped char
+                        is_start_of_arg = false;
+                        continue;
+                    }
+                }
+                // Not a recognized escape, keep the backslash
+                current.push('\\');
+                idx += 1;
             }
             '[' => {
                 depth += 1;
                 current.push(c);
+                idx += 1;
             }
             ']' => {
                 if depth > 0 {
                     depth -= 1;
                 }
                 current.push(c);
+                idx += 1;
             }
             ';' if depth == 0 => {
                 seen_separator = true;
@@ -648,13 +833,17 @@ fn parse_nested_args(
                 current.clear();
                 first_char_escaped = false;
                 is_start_of_arg = true;
-                continue; // Skip setting is_start_of_arg to false
+                idx += 1;
             }
             _ => {
                 current.push(c);
+                idx += 1;
             }
         }
-        is_start_of_arg = false;
+        
+        if c != ';' || depth != 0 {
+            is_start_of_arg = false;
+        }
     }
 
     // Always add the last argument if we saw a separator (e.g., "user;" should have 2 args)
@@ -683,8 +872,9 @@ fn parse_single_arg(
     force_literal: bool,
 ) -> Result<SmallVec<[ParsedArg; 8]>, nom::Err<()>> {
     if !force_literal && input.starts_with('$') {
-        let parser = ForgeScriptParser::new(manager.clone(), input);
-        let res = parser.parse();
+        // Use new_internal to parse directly without code block extraction
+        let parser = ForgeScriptParser::new_internal(manager.clone(), input);
+        let res = parser.parse_internal();
         if let Some(f) = res.functions.first() {
             Ok(smallvec![ParsedArg::Function {
                 func: Box::new(f.clone())

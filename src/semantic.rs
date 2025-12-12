@@ -1,15 +1,13 @@
 use regex::Regex;
 use tower_lsp::lsp_types::{Position, SemanticToken};
 
-/// Extract tokens using regex-based rules inside code blocks
-pub fn extract_semantic_tokens(source: &str) -> Vec<SemanticToken> {
-    extract_semantic_tokens_with_colors(source, false)
-}
-
 /// Extract tokens with optional multi-color function highlighting
 /// When `use_function_colors` is true, functions alternate between FUNCTION (0) and PARAMETER (3)
 /// token types sequentially as they appear in the code.
-pub fn extract_semantic_tokens_with_colors(source: &str, use_function_colors: bool) -> Vec<SemanticToken> {
+pub fn extract_semantic_tokens_with_colors(
+    source: &str,
+    use_function_colors: bool,
+) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let code_block_re = Regex::new(r"code:\s*`{1,3}((?:\\`|[\s\S])*?)`{1,3}").unwrap();
     let func_re = Regex::new(
