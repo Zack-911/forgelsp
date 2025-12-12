@@ -35,6 +35,8 @@ pub struct CustomFunctionParam {
     pub param_type: String,
     #[serde(default)]
     pub required: Option<bool>,
+    #[serde(default)]
+    pub rest: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +46,10 @@ pub struct CustomFunction {
     pub description: Option<String>,
     #[serde(default)]
     pub params: Option<JsonValue>, // Can be array of objects or array of strings
+    #[serde(default)]
+    pub brackets: Option<bool>,
+    #[serde(default)]
+    pub alias: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

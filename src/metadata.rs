@@ -259,7 +259,7 @@ impl MetadataManager {
 
         for custom in custom_funcs {
             // Convert custom function params to standard Arg format
-            let args = if let Some(params) = custom.params {
+            let args = if let Some(params) = custom.params.clone() {
                 match params {
                     JsonValue::Array(arr) => {
                         let mut parsed_args = Vec::new();
@@ -274,7 +274,7 @@ impl MetadataManager {
                                     parsed_args.push(Arg {
                                         name: param.name,
                                         description: param.description.unwrap_or_default(),
-                                        rest: false,
+                                        rest: param.rest.unwrap_or(false),
                                         required: param.required,
                                         arg_type: JsonValue::String(param.param_type),
                                         condition: None,
@@ -314,25 +314,48 @@ impl MetadataManager {
                 None
             };
 
+            // Determine brackets value
+            // - If explicitly set, use that value
+            // - If params given but brackets not set, default to true (required)
+            // - If no params and brackets not set, leave as None (undefined)
+            let brackets = if let Some(b) = custom.brackets {
+                Some(b)
+            } else if custom.params.is_some() {
+                Some(true)
+            } else {
+                None
+            };
+
             let func = Function {
                 name: custom.name.clone(),
                 version: JsonValue::String("1.0.0".to_string()),
                 description: custom
                     .description
                     .unwrap_or_else(|| "Custom function".to_string()),
-                brackets: Some(true),
+                brackets,
                 unwrap: false,
                 args,
                 output: None,
                 category: "custom".to_string(),
-                aliases: None,
+                aliases: custom.alias.clone(),
                 experimental: None,
                 examples: None,
                 deprecated: None,
             };
 
-            let arc_func = Arc::new(func);
+            // Insert the main function
+            let arc_func = Arc::new(func.clone());
             trie.insert(&custom.name, arc_func);
+
+            // Insert aliases (like load_all does)
+            if let Some(aliases) = &func.aliases {
+                for alias in aliases {
+                    let mut alias_func = func.clone();
+                    alias_func.name = alias.clone();
+                    let arc_alias_func = Arc::new(alias_func);
+                    trie.insert(alias, arc_alias_func);
+                }
+            }
         }
 
         Ok(())

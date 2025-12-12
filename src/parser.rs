@@ -84,6 +84,36 @@ pub enum ParsedArg {
     Function { func: Box<ParsedFunction> },
 }
 
+/// Map a position in the concatenated code string back to the original block.
+/// Returns (block_index, offset_within_block).
+/// Each block is separated by a newline (\n) in the concatenated string.
+fn map_to_block(position: usize, block_lengths: &[usize]) -> (usize, usize) {
+    let mut current_pos = 0;
+
+    for (idx, &length) in block_lengths.iter().enumerate() {
+        // Each block contributes: length + 1 (for the newline separator)
+        // except the last one might not have consumed the newline yet
+        let block_end = current_pos + length;
+
+        if position < block_end {
+            // Position falls within this block
+            return (idx, position - current_pos);
+        }
+
+        // Move past this block and its newline separator
+        current_pos = block_end + 1; // +1 for the '\n'
+    }
+
+    // If we're past all blocks, return the last block
+    let last_idx = block_lengths.len().saturating_sub(1);
+    let last_offset = if last_idx < block_lengths.len() {
+        block_lengths[last_idx]
+    } else {
+        0
+    };
+    (last_idx, last_offset)
+}
+
 /// Check if a character at the given byte index is escaped.
 /// For backtick: 1 backslash escapes it (\`)
 /// For special chars ($, ;, [, ]): 2 backslashes escape it (\\$, \\;, etc.)
@@ -267,6 +297,7 @@ impl<'a> ForgeScriptParser<'a> {
         // Pattern: code: ` ... ` where backticks can be escaped with \`
         let mut code_to_parse = String::new();
         let mut offsets: Vec<usize> = Vec::new();
+        let mut lengths: Vec<usize> = Vec::new();
         let mut block_count = 0;
 
         let bytes = self.code.as_bytes();
@@ -308,6 +339,7 @@ impl<'a> ForgeScriptParser<'a> {
                         block_count += 1;
                         let content = &self.code[content_start..j];
                         offsets.push(content_start);
+                        lengths.push(content.len());
                         code_to_parse.push_str(content);
                         code_to_parse.push('\n');
                         i = j + 1; // Move past the closing backtick
@@ -325,15 +357,20 @@ impl<'a> ForgeScriptParser<'a> {
             let mut result = parser.parse();
 
             // Adjust positions back to original file coordinates
+            // Map each position to the correct source block
             if !offsets.is_empty() {
-                let offset = offsets[0]; // Use first block's offset for now
                 for diag in &mut result.diagnostics {
-                    diag.start += offset;
-                    diag.end += offset;
+                    let (block_idx, offset_in_block) = map_to_block(diag.start, &lengths);
+                    diag.start = offsets[block_idx] + offset_in_block;
+                    let (block_idx_end, offset_in_block_end) = map_to_block(diag.end, &lengths);
+                    diag.end = offsets[block_idx_end] + offset_in_block_end;
                 }
                 for func in &mut result.functions {
-                    func.span.0 += offset;
-                    func.span.1 += offset;
+                    let (block_idx_start, offset_in_block_start) =
+                        map_to_block(func.span.0, &lengths);
+                    func.span.0 = offsets[block_idx_start] + offset_in_block_start;
+                    let (block_idx_end, offset_in_block_end) = map_to_block(func.span.1, &lengths);
+                    func.span.1 = offsets[block_idx_end] + offset_in_block_end;
                 }
             }
 
