@@ -209,24 +209,92 @@ fn extract_tokens_from_code(
             let mut j = idx + 1;
 
             // Skip modifiers
-            while j < char_positions.len()
-                && (char_positions[j].1 == '!' || char_positions[j].1 == '#')
-            {
-                j += 1;
+            while j < char_positions.len() {
+                let (_, c) = char_positions[j];
+                if c == '!' || c == '#' {
+                    j += 1;
+                } else if c == '@' {
+                    // Check for @[...]
+                    if j + 1 < char_positions.len() && char_positions[j + 1].1 == '[' {
+                        let open_bracket_byte_idx = char_positions[j + 1].0;
+                        if let Some(close_byte_idx) =
+                            find_matching_bracket_raw(bytes, open_bracket_byte_idx)
+                        {
+                            // Advance j to after the closing bracket
+                            while j < char_positions.len() && char_positions[j].0 <= close_byte_idx
+                            {
+                                j += 1;
+                            }
+                        } else {
+                            // Unmatched bracket, stop modifier parsing
+                            break;
+                        }
+                    } else {
+                        // Just @ without [, stop modifier parsing
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
 
-            // Try matching character by character
-            while j < char_positions.len()
-                && (char_positions[j].1.is_alphanumeric() || char_positions[j].1 == '_')
+            // If we ran out of characters, stop
+            if j >= char_positions.len() {
+                idx += 1;
+                continue;
+            }
+
+            let name_start_byte_idx = char_positions[j].0;
+            let mut name_end_char_idx = j;
+
+            // Find the end of the identifier
+            while name_end_char_idx < char_positions.len()
+                && (char_positions[name_end_char_idx].1.is_alphanumeric()
+                    || char_positions[name_end_char_idx].1 == '_')
             {
-                let end_byte_idx = char_positions[j].0 + char_positions[j].1.len_utf8();
-                if let Some(candidate) = code.get(i..end_byte_idx) {
-                    if manager.get(candidate).is_some() {
+                name_end_char_idx += 1;
+            }
+
+            // Check if the next character is '['
+            let has_bracket = name_end_char_idx < char_positions.len()
+                && char_positions[name_end_char_idx].1 == '[';
+
+            if has_bracket {
+                // Case 1: Bracketed call - check full identifier
+                let end_byte_idx = if name_end_char_idx < char_positions.len() {
+                    char_positions[name_end_char_idx].0
+                } else {
+                    code.len()
+                };
+
+                if let Some(full_name) = code.get(name_start_byte_idx..end_byte_idx) {
+                    let lookup_key = format!("${}", full_name);
+                    if manager.get_exact(&lookup_key).is_some() {
                         best_match_len = end_byte_idx - i;
-                        best_match_char_count = j - idx + 1;
+                        best_match_char_count = name_end_char_idx - idx;
                     }
                 }
-                j += 1;
+            } else {
+                // Case 2: No bracket - find longest prefix match
+                // We iterate from the full identifier length down to 1 char
+                let mut check_idx = name_end_char_idx;
+                while check_idx > j {
+                    let end_byte_idx = if check_idx < char_positions.len() {
+                        char_positions[check_idx].0
+                    } else {
+                        code.len()
+                    };
+
+                    if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
+                        let lookup_key = format!("${}", name_part);
+                        if manager.get_exact(&lookup_key).is_some() {
+                            best_match_len = end_byte_idx - i;
+                            best_match_char_count = check_idx - idx;
+                            break; // Found longest match
+                        }
+                    }
+                    check_idx -= 1;
+                }
             }
 
             if best_match_len > 0 {
@@ -362,4 +430,117 @@ fn offset_to_position(text: &str, offset: usize) -> Position {
     }
 
     Position::new(line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::CustomFunction;
+
+    #[tokio::test]
+    async fn test_function_modifiers() {
+        let manager = MetadataManager::new("./.cache_test", vec![])
+            .await
+            .expect("Failed to create manager");
+
+        // Add a test function
+        manager
+            .add_custom_functions(vec![CustomFunction {
+                name: "$ban".to_string(),
+                description: None,
+                params: None,
+                brackets: None,
+                alias: None,
+            }])
+            .expect("Failed to add custom function");
+
+        let manager = Arc::new(manager);
+
+        // Test cases
+        let cases = vec![
+            ("code: `$ban`", true),
+            ("code: `$!ban`", true),
+            ("code: `$#ban`", true),
+            ("code: `$@[user]ban`", true),
+            ("code: `$!#@[user]ban`", true),
+            ("code: `$unknown`", false),
+            ("code: `$!unknown`", false),
+        ];
+
+        for (code, should_match) in cases {
+            let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+            if should_match {
+                assert!(!tokens.is_empty(), "Failed to match {}", code);
+                assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
+            } else {
+                assert!(tokens.is_empty(), "Should not match {}", code);
+            }
+        }
+
+        // Clean up
+        let _ = std::fs::remove_dir_all("./.cache_test");
+    }
+
+    #[tokio::test]
+    async fn test_bracket_and_prefix_matching() {
+        let manager = MetadataManager::new("./.cache_test_semantic", vec![])
+            .await
+            .expect("Failed to create manager");
+
+        // Add test functions
+        manager
+            .add_custom_functions(vec![
+                CustomFunction {
+                    name: "$ping".to_string(),
+                    description: None,
+                    params: None,
+                    brackets: None,
+                    alias: None,
+                },
+                CustomFunction {
+                    name: "$deleteCache".to_string(),
+                    description: None,
+                    params: None,
+                    brackets: None,
+                    alias: None,
+                },
+            ])
+            .expect("Failed to add custom functions");
+
+        let manager = Arc::new(manager);
+
+        let cases = vec![
+            // Case 1: Bracketed call with exact match
+            ("code: `$deleteCache[]`", true, "$deleteCache"),
+            // Case 2: Bracketed call with NO match (should NOT match prefix $delete)
+            ("code: `$delete[]`", false, ""),
+            // Case 3: Prefix matching (should match $ping)
+            ("code: `$pingms`", true, "$ping"),
+            // Case 4: Exact match without brackets
+            ("code: `$ping`", true, "$ping"),
+            // Case 5: No match
+            ("code: `$unknown`", false, ""),
+            // Case 6: Bracketed call where full name doesn't exist, but prefix does.
+            // e.g. $ping[] exists, but $pingExtra[] does not. $ping should NOT be highlighted.
+            ("code: `$pingExtra[]`", false, ""),
+        ];
+
+        for (code, should_match, expected_name) in cases {
+            let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+            if should_match {
+                assert!(!tokens.is_empty(), "Failed to match {}", code);
+                assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
+
+                // Verify length matches expected name length (excluding $)
+                // token length is u32
+                let expected_len = expected_name.len() as u32;
+                assert_eq!(tokens[0].length, expected_len, "Wrong length for {}", code);
+            } else {
+                assert!(tokens.is_empty(), "Should not match {}", code);
+            }
+        }
+
+        // Clean up
+        let _ = std::fs::remove_dir_all("./.cache_test_semantic");
+    }
 }

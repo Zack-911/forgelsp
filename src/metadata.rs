@@ -226,6 +226,18 @@ impl FunctionTrie {
         best_match
     }
 
+    pub fn get_exact(&self, text: &str) -> Option<Arc<Function>> {
+        let mut node = &self.root;
+        for c in text.to_lowercase().chars() {
+            if let Some(next) = node.children.get(&c) {
+                node = next;
+            } else {
+                return None;
+            }
+        }
+        node.value.clone()
+    }
+
     pub fn len(&self) -> usize {
         self.size
     }
@@ -387,6 +399,11 @@ impl MetadataManager {
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
         let trie = self.trie.read().unwrap();
         trie.get(name).map(|(_, func)| func)
+    }
+
+    pub fn get_exact(&self, name: &str) -> Option<Arc<Function>> {
+        let trie = self.trie.read().unwrap();
+        trie.get_exact(name)
     }
 
     pub fn function_count(&self) -> usize {
