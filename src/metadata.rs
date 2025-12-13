@@ -42,6 +42,29 @@ pub struct Function {
     pub deprecated: Option<bool>,
 }
 
+impl Function {
+    pub fn signature_label(&self) -> String {
+        let args = self.args.as_ref().map(|a| a.as_slice()).unwrap_or(&[]);
+        let params = args
+            .iter()
+            .map(|a| {
+                let mut name = String::new();
+                if a.rest {
+                    name.push_str("...");
+                }
+                name.push_str(&a.name);
+                if a.required == Some(false) {
+                    name.push('?');
+                }
+                name
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        format!("{}[{}]", self.name, params)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Arg {

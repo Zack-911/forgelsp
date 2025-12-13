@@ -424,31 +424,23 @@ impl LanguageServer for ForgeScriptServer {
             let args = func.args.clone().unwrap_or_default();
             let params: Vec<ParameterInformation> = args
                 .iter()
-                .map(|a| ParameterInformation {
-                    label: ParameterLabel::Simple(a.name.clone()),
-                    documentation: Some(Documentation::String(a.description.clone())),
+                .map(|a| {
+                    let mut name = String::new();
+                    if a.rest {
+                        name.push_str("...");
+                    }
+                    name.push_str(&a.name);
+                    if a.required == Some(false) {
+                        name.push('?');
+                    }
+                    ParameterInformation {
+                        label: ParameterLabel::Simple(name),
+                        documentation: Some(Documentation::String(a.description.clone())),
+                    }
                 })
                 .collect();
 
-            let sig_label = if func.brackets == Some(true) {
-                format!(
-                    "{}[{}]",
-                    func.name,
-                    args.iter()
-                        .map(|a| a.name.clone())
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
-            } else {
-                format!(
-                    "${} {}",
-                    func.name,
-                    args.iter()
-                        .map(|a| a.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            };
+            let sig_label = func.signature_label();
 
             let signature = SignatureInformation {
                 label: sig_label,
