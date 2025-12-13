@@ -269,6 +269,20 @@ fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
     find_matching_bracket_raw(code, pos)
 }
 
+fn is_ignore_error_directive(code: &str, dollar_idx: usize) -> Option<usize> {
+    let directive = "$c[fs@ignore-error]";
+    if dollar_idx + directive.len() > code.len() {
+        return None;
+    }
+    let rest = &code[dollar_idx..];
+
+    if rest.starts_with(directive) {
+        Some(dollar_idx + directive.len())
+    } else {
+        None
+    }
+}
+
 pub struct ForgeScriptParser<'a> {
     manager: Arc<MetadataManager>,
     code: &'a str,
@@ -395,6 +409,8 @@ impl<'a> ForgeScriptParser<'a> {
 
         let mut iter = self.code.char_indices().peekable();
         let mut last_idx = 0;
+        let mut ignore_next_line = false;
+        let mut pending_ignore_next_line = false;
 
         while let Some((idx, c)) = iter.next() {
             // Handle backslash escaping
@@ -442,7 +458,34 @@ impl<'a> ForgeScriptParser<'a> {
                 }
             }
 
+            if c == '\n' {
+                ignore_next_line = pending_ignore_next_line;
+                pending_ignore_next_line = false;
+            }
+
             if c == '$' && !is_escaped(self.code, idx) {
+                if let Some(end_idx) = is_ignore_error_directive(self.code, idx) {
+                    pending_ignore_next_line = true;
+
+                    tokens.push(Token {
+                        kind: TokenKind::Text,
+                        text: Box::leak(self.code[idx..end_idx].to_string().into_boxed_str()),
+                        start: idx,
+                        end: end_idx,
+                    });
+
+                    // Advance iterator to end_idx
+                    while let Some(&(j, _)) = iter.peek() {
+                        if j < end_idx {
+                            iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    last_idx = end_idx;
+                    continue;
+                }
                 // push previous text as a token
                 if last_idx < idx {
                     tokens.push(Token {
@@ -480,11 +523,14 @@ impl<'a> ForgeScriptParser<'a> {
                         });
                         continue;
                     } else {
-                        diagnostics.push(Diagnostic {
-                            message: "Unclosed '{' for JavaScript expression `${...}`".to_string(),
-                            start,
-                            end: self.code.len(),
-                        });
+                        if !ignore_next_line {
+                            diagnostics.push(Diagnostic {
+                                message: "Unclosed '{' for JavaScript expression `${...}`"
+                                    .to_string(),
+                                start,
+                                end: self.code.len(),
+                            });
+                        }
                         last_idx = self.code.len();
                         continue;
                     }
@@ -592,27 +638,31 @@ impl<'a> ForgeScriptParser<'a> {
                             });
                             continue;
                         } else {
-                            diagnostics.push(Diagnostic {
-                                message: format!(
-                                    "Unclosed '[' for escape function `${}`",
-                                    full_name
-                                ),
-                                start,
-                                end: self.code.len(),
-                            });
+                            if !ignore_next_line {
+                                diagnostics.push(Diagnostic {
+                                    message: format!(
+                                        "Unclosed '[' for escape function `${}`",
+                                        full_name
+                                    ),
+                                    start,
+                                    end: self.code.len(),
+                                });
+                            }
                             last_idx = self.code.len();
                             continue;
                         }
                     } else {
                         // $esc or $escape without brackets - treat as unknown function
-                        diagnostics.push(Diagnostic {
-                            message: format!(
-                                "${} expects brackets `[...]` containing content to escape",
-                                full_name
-                            ),
-                            start,
-                            end: full_name_end,
-                        });
+                        if !ignore_next_line {
+                            diagnostics.push(Diagnostic {
+                                message: format!(
+                                    "${} expects brackets `[...]` containing content to escape",
+                                    full_name
+                                ),
+                                start,
+                                end: full_name_end,
+                            });
+                        }
                         tokens.push(Token {
                             kind: TokenKind::Unknown,
                             text: Box::leak(
@@ -751,11 +801,13 @@ impl<'a> ForgeScriptParser<'a> {
                                 }
                                 last_idx = end_idx + 1;
                             } else {
-                                diagnostics.push(Diagnostic {
-                                    message: format!("Unclosed '[' for function `${}`", name),
-                                    start,
-                                    end: self.code.len(),
-                                });
+                                if !ignore_next_line {
+                                    diagnostics.push(Diagnostic {
+                                        message: format!("Unclosed '[' for function `${}`", name),
+                                        start,
+                                        end: self.code.len(),
+                                    });
+                                }
                                 last_idx = self.code.len();
                             }
                         } else {
@@ -799,29 +851,39 @@ impl<'a> ForgeScriptParser<'a> {
                                         &mut diagnostics,
                                         (start, last_idx),
                                         self.code,
+                                        ignore_next_line,
                                     );
                                 }
                                 Err(_) => {
-                                    diagnostics.push(Diagnostic {
-                                        message: format!("Failed to parse args for `${}`", name),
-                                        start,
-                                        end: last_idx,
-                                    });
+                                    if !ignore_next_line {
+                                        diagnostics.push(Diagnostic {
+                                            message: format!(
+                                                "Failed to parse args for `${}`",
+                                                name
+                                            ),
+                                            start,
+                                            end: last_idx,
+                                        });
+                                    }
                                 }
                             }
                         } else {
-                            diagnostics.push(Diagnostic {
-                                message: format!("${} does not accept brackets", name),
-                                start,
-                                end: last_idx,
-                            });
+                            if !ignore_next_line {
+                                diagnostics.push(Diagnostic {
+                                    message: format!("${} does not accept brackets", name),
+                                    start,
+                                    end: last_idx,
+                                });
+                            }
                         }
                     } else if meta.brackets == Some(true) {
-                        diagnostics.push(Diagnostic {
-                            message: format!("${} expects brackets `[...]`", name),
-                            start,
-                            end: token_end,
-                        });
+                        if !ignore_next_line {
+                            diagnostics.push(Diagnostic {
+                                message: format!("${} expects brackets `[...]`", name),
+                                start,
+                                end: token_end,
+                            });
+                        }
                     }
 
                     tokens.push(Token {
@@ -844,23 +906,27 @@ impl<'a> ForgeScriptParser<'a> {
                         });
                     }
 
-                    functions.push(ParsedFunction {
-                        name: meta.name.trim_start_matches('$').to_string(),
-                        matched: self.code[start..token_end].to_string(),
-                        args: parsed_args,
-                        span: (start, if has_suffix { token_end } else { last_idx }),
-                        silent,
-                        negated,
-                        count: None,
-                        meta,
-                    });
+                    if !ignore_next_line {
+                        functions.push(ParsedFunction {
+                            name: meta.name.trim_start_matches('$').to_string(),
+                            matched: self.code[start..token_end].to_string(),
+                            args: parsed_args,
+                            span: (start, if has_suffix { token_end } else { last_idx }),
+                            silent,
+                            negated,
+                            count: None,
+                            meta,
+                        });
+                    }
                 } else {
                     // No match found (either exact match failed, or no prefix match)
-                    diagnostics.push(Diagnostic {
-                        message: format!("Unknown function `${}`", full_name),
-                        start,
-                        end: full_name_end,
-                    });
+                    if !ignore_next_line {
+                        diagnostics.push(Diagnostic {
+                            message: format!("Unknown function `${}`", full_name),
+                            start,
+                            end: full_name_end,
+                        });
+                    }
                     tokens.push(Token {
                         kind: TokenKind::Unknown,
                         text: Box::leak(
@@ -903,15 +969,19 @@ impl<'a> ForgeScriptParser<'a> {
                                 });
                             }
                             for mut diag in res.diagnostics {
-                                diag.start += content_start;
-                                diag.end += content_start;
-                                diagnostics.push(diag);
+                                if !ignore_next_line {
+                                    diag.start += content_start;
+                                    diag.end += content_start;
+                                    diagnostics.push(diag);
+                                }
                             }
                             // Append functions found inside
                             for mut func in res.functions {
-                                func.span.0 += content_start;
-                                func.span.1 += content_start;
-                                functions.push(func);
+                                if !ignore_next_line {
+                                    func.span.0 += content_start;
+                                    func.span.1 += content_start;
+                                    functions.push(func);
+                                }
                             }
 
                             // Emit ']' token
@@ -935,14 +1005,16 @@ impl<'a> ForgeScriptParser<'a> {
                             last_idx = end_idx + 1;
                         } else {
                             // Unclosed bracket
-                            diagnostics.push(Diagnostic {
-                                message: format!(
-                                    "Unclosed '[' for unknown function `${}`",
-                                    full_name
-                                ),
-                                start: i,
-                                end: self.code.len(),
-                            });
+                            if !ignore_next_line {
+                                diagnostics.push(Diagnostic {
+                                    message: format!(
+                                        "Unclosed '[' for unknown function `${}`",
+                                        full_name
+                                    ),
+                                    start: i,
+                                    end: self.code.len(),
+                                });
+                            }
                             // Consume the '[' as text
                             tokens.push(Token {
                                 kind: TokenKind::Text,
@@ -1234,7 +1306,11 @@ fn validate_arg_count(
     diagnostics: &mut Vec<Diagnostic>,
     span: (usize, usize),
     _source: &str,
+    ignore_error: bool,
 ) {
+    if ignore_error {
+        return;
+    }
     if total < min {
         diagnostics.push(Diagnostic {
             message: format!("${} expects at least {} args, got {}", name, min, total),
@@ -1247,5 +1323,75 @@ fn validate_arg_count(
             start: span.0,
             end: span.1,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::CustomFunction;
+    use serde_json::json;
+
+    async fn create_manager() -> Arc<MetadataManager> {
+        let manager = MetadataManager::new("./.test_cache", vec![]).await.unwrap();
+        Arc::new(manager)
+    }
+
+    #[tokio::test]
+    async fn test_ignore_error_directive_unknown_function() {
+        let manager = create_manager().await;
+        let code = "code: `$c[fs@ignore-error]\n$doesNotExist[a;b]`";
+        let parser = ForgeScriptParser::new(manager, code);
+        let result = parser.parse();
+
+        assert!(
+            result.diagnostics.is_empty(),
+            "Diagnostics should be empty, but got: {:?}",
+            result.diagnostics
+        );
+        assert!(result.functions.is_empty(), "Functions should be empty");
+    }
+
+    #[tokio::test]
+    async fn test_ignore_error_directive_arg_count() {
+        let manager = create_manager().await;
+        // Add a dummy function $ping that takes 0 args
+        let custom_func = CustomFunction {
+            name: "$ping".to_string(),
+            description: None,
+            params: Some(json!([])), // 0 args
+            brackets: Some(true),
+            alias: None,
+        };
+        manager.add_custom_functions(vec![custom_func]).unwrap();
+
+        let code = "code: `$c[fs@ignore-error]\n$ping[a;b;c]`";
+        let parser = ForgeScriptParser::new(manager, code);
+        let result = parser.parse();
+
+        assert!(
+            result.diagnostics.is_empty(),
+            "Diagnostics should be empty, but got: {:?}",
+            result.diagnostics
+        );
+        assert!(
+            result.functions.is_empty(),
+            "Functions should be empty (ignored)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ignore_error_directive_scope() {
+        let manager = create_manager().await;
+        let code = "code: `$c[fs@ignore-error]\n$bad1\n$bad2`";
+        let parser = ForgeScriptParser::new(manager, code);
+        let result = parser.parse();
+
+        assert_eq!(
+            result.diagnostics.len(),
+            1,
+            "Should have 1 diagnostic for $bad2"
+        );
+        assert_eq!(result.diagnostics[0].message, "Unknown function `$bad2`");
     }
 }
