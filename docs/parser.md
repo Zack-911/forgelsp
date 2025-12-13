@@ -429,3 +429,29 @@ ParsedFunction {
     ...
 }
 ```
+
+## Directives
+
+### Ignore Error Directive
+
+The parser supports a special directive to suppress errors and function registration for the **next logical line**. This is useful for suppressing false positives or intentionally invalid code.
+
+**Syntax:**
+```forgescript
+$c[fs@ignore-error]
+```
+
+**Behavior:**
+- Suppresses all diagnostics (unknown function, arg count, etc.) for the next line.
+- Prevents functions on the next line from being registered in the `functions` list.
+- Resets automatically after the next newline.
+- Does **not** affect tokenization (tokens are still emitted).
+
+**Example:**
+
+```forgescript
+$c[fs@ignore-error]
+$doesNotExist[a;b]  // No error, function not registered
+$ping               // Parsed normally
+```
+
