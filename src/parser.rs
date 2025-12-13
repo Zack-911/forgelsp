@@ -694,7 +694,7 @@ impl<'a> ForgeScriptParser<'a> {
                             .to_string();
 
                         // Check if it's a valid prefix of our full_name
-                        if full_name.starts_with(&matched_name) {
+                        if full_name.to_lowercase().starts_with(&matched_name) {
                             matched_function = Some((matched_name.clone(), func));
                             // Calculate where the matched name ends
                             let matched_len_bytes = matched_name.len();
@@ -845,7 +845,7 @@ impl<'a> ForgeScriptParser<'a> {
                     }
 
                     functions.push(ParsedFunction {
-                        name: name.clone(),
+                        name: meta.name.trim_start_matches('$').to_string(),
                         matched: self.code[start..token_end].to_string(),
                         args: parsed_args,
                         span: (start, if has_suffix { token_end } else { last_idx }),
@@ -891,7 +891,7 @@ impl<'a> ForgeScriptParser<'a> {
                             // Parse content recursively
                             let parser =
                                 ForgeScriptParser::new_internal(self.manager.clone(), content);
-                            let mut res = parser.parse_internal();
+                            let res = parser.parse_internal();
 
                             // Adjust offsets and append tokens/diagnostics
                             for token in res.tokens {
