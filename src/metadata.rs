@@ -406,6 +406,11 @@ impl MetadataManager {
         trie.get_exact(name)
     }
 
+    pub fn get_with_match(&self, name: &str) -> Option<(String, Arc<Function>)> {
+        let trie = self.trie.read().unwrap();
+        trie.get(name)
+    }
+
     pub fn function_count(&self) -> usize {
         let trie = self.trie.read().unwrap();
         trie.len()
