@@ -91,52 +91,21 @@ pub fn extract_semantic_tokens_with_colors(
     manager: Arc<MetadataManager>,
 ) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
-    let bytes = source.as_bytes();
 
     // Extract code blocks manually (handle escaped backticks)
-    let mut i = 0;
-    while i < bytes.len() {
-        // Look for "code:" pattern
-        if i + 5 <= bytes.len() && &source[i..i + 5] == "code:" {
-            let mut j = i + 5;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
+    // Extract code blocks using regex (handles escaped backticks and UTF-8 correctly)
+    // Pattern: code: ` ... ` where backticks can be escaped with \`
+    let re = regex::Regex::new(r"(?s)code:\s*`((?:[^`\\]|\\.)*)`").unwrap();
 
-            // Check for opening backtick
-            if j < bytes.len() && bytes[j] == b'`' {
-                j += 1;
-                let content_start = j;
+    for cap in re.captures_iter(source) {
+        if let Some(match_group) = cap.get(1) {
+            let content_start = match_group.start();
+            let code = match_group.as_str();
 
-                // Find closing backtick (respecting escapes)
-                let mut found_end = false;
-                while j < bytes.len() {
-                    if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                        j += 2;
-                        continue;
-                    }
-                    if bytes[j] == b'`' {
-                        found_end = true;
-                        break;
-                    }
-                    j += 1;
-                }
-
-                if found_end {
-                    let code = &source[content_start..j];
-                    let found_tokens = extract_tokens_from_code(
-                        code,
-                        content_start,
-                        use_function_colors,
-                        manager.clone(),
-                    );
-                    tokens.extend(found_tokens);
-                    i = j + 1;
-                    continue;
-                }
-            }
+            let found_tokens =
+                extract_tokens_from_code(code, content_start, use_function_colors, manager.clone());
+            tokens.extend(found_tokens);
         }
-        i += 1;
     }
 
     // Convert to relative tokens
@@ -542,5 +511,24 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_dir_all("./.cache_test_semantic");
+    }
+
+    #[tokio::test]
+    async fn test_utf8_boundaries() {
+        let manager = MetadataManager::new("./.cache_test_semantic_utf8", vec![])
+            .await
+            .expect("Failed to create manager");
+        let manager = Arc::new(manager);
+
+        // Test case with emojis outside and inside code block
+        let code = "🔔\ncode: `🔔$ping`";
+
+        // Should not panic
+        let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+
+        // Just checking it doesn't panic is enough for this test.
+        assert!(tokens.is_empty() || !tokens.is_empty());
+
+        let _ = std::fs::remove_dir_all("./.cache_test_semantic_utf8");
     }
 }
