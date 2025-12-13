@@ -82,7 +82,18 @@ pub async fn handle_hover(
         return Ok(None);
     }
 
-    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == '$';
+    // Include modifier characters in the initial token capture
+    let is_ident_char = |c: char| {
+        c.is_alphanumeric()
+            || c == '_'
+            || c == '.'
+            || c == '$'
+            || c == '!'
+            || c == '#'
+            || c == '@'
+            || c == '['
+            || c == ']'
+    };
     let bytes = text.as_bytes();
 
     // Find start of token, skipping escaped $ characters
@@ -104,23 +115,77 @@ pub async fn handle_hover(
         return Ok(None);
     }
 
-    let token = text[start_pos..end].to_string();
+    let raw_token = text[start_pos..end].to_string();
 
     // Don't provide hover for escape functions or JavaScript expressions
-    if token == "$esc" || token == "$escape" {
+    if raw_token == "$esc" || raw_token == "$escape" {
         return Ok(None);
     }
 
     // Check if this is a JavaScript expression ${...}
-    if token.starts_with("${") {
+    if raw_token.starts_with("${") {
         return Ok(None);
+    }
+
+    // Process modifiers to find the actual function name
+    // Modifiers can be: ! (silent), # (negated), @[...] (scope)
+    // Example: $!#@[user]ban
+    let mut clean_token = raw_token.clone();
+
+    if clean_token.starts_with('$') {
+        let mut chars = clean_token.chars().peekable();
+        chars.next(); // consume $
+
+        let mut modifier_end_idx = 1; // start after $
+
+        while let Some(&c) = chars.peek() {
+            if c == '!' || c == '#' {
+                modifier_end_idx += 1;
+                chars.next();
+            } else if c == '@' {
+                // Handle @[...]
+                modifier_end_idx += 1;
+                chars.next(); // consume @
+
+                if let Some(&'[') = chars.peek() {
+                    modifier_end_idx += 1;
+                    chars.next(); // consume [
+
+                    // Find matching ]
+                    let mut depth = 1;
+                    while let Some(inner_c) = chars.next() {
+                        modifier_end_idx += inner_c.len_utf8();
+                        if inner_c == '[' {
+                            depth += 1;
+                        } else if inner_c == ']' {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Reconstruct the token with just $ + function name
+        if modifier_end_idx > 1 {
+            // Check if we have a valid function name after modifiers
+            let after_modifiers = &clean_token[modifier_end_idx..];
+            if !after_modifiers.is_empty() {
+                clean_token = format!("${}", after_modifiers);
+            }
+        }
     }
 
     // Acquire a read lock on the manager
     let mgr = server.manager.read().unwrap();
     let mgr_inner = mgr.clone();
 
-    if let Some(func_ref) = mgr_inner.get(&token) {
+    // Try to find the function using the cleaned token
+    if let Some(func_ref) = mgr_inner.get(&clean_token) {
         let func_name = &func_ref.name;
         let func_description = &func_ref.description;
         let func_args = &func_ref.args;
