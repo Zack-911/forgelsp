@@ -324,7 +324,7 @@ impl<'a> ForgeScriptParser<'a> {
 
         while i < self.code.len() {
             // Look for "code:" pattern
-            if i + 5 <= self.code.len() && &self.code[i..i + 5] == "code:" {
+            if i + 5 <= self.code.len() && &self.code.as_bytes()[i..i + 5] == b"code:" {
                 // Skip "code:" and any whitespace
                 let mut j = i + 5;
                 while j < bytes.len() && bytes[j].is_ascii_whitespace() {
@@ -1393,5 +1393,15 @@ mod tests {
             "Should have 1 diagnostic for $bad2"
         );
         assert_eq!(result.diagnostics[0].message, "Unknown function `$bad2`");
+    }
+
+    #[tokio::test]
+    async fn test_utf8_panic_reproduction() {
+        let manager = create_manager().await;
+        // The string that caused the panic: "// 🟨\ncode: `$ping`"
+        let code = "// 🟨\ncode: `$ping`";
+        let parser = ForgeScriptParser::new(manager, code);
+        let _result = parser.parse();
+        // If it doesn't panic, we are good.
     }
 }
