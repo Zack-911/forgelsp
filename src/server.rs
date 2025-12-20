@@ -452,9 +452,38 @@ impl LanguageServer for ForgeScriptServer {
                     if a.required == Some(false) {
                         name.push('?');
                     }
+
+                    let mut doc = a.description.clone();
+
+                    if let Some(enum_name) = &a.enum_name {
+                        if let Ok(enums) = mgr.enums.read() {
+                            if let Some(values) = enums.get(enum_name) {
+                                doc.push_str("\n\n**");
+                                doc.push_str(enum_name);
+                                doc.push_str("**:\n");
+                                for v in values {
+                                    doc.push_str("- ");
+                                    doc.push_str(v);
+                                    doc.push('\n');
+                                }
+                            }
+                        }
+                    } else if let Some(values) = &a.arg_enum {
+                        // Handle inline enums if any
+                        doc.push_str("\n\n**Values**:\n");
+                        for v in values {
+                            doc.push_str("- ");
+                            doc.push_str(v);
+                            doc.push('\n');
+                        }
+                    }
+
                     ParameterInformation {
                         label: ParameterLabel::Simple(name),
-                        documentation: Some(Documentation::String(a.description.clone())),
+                        documentation: Some(Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: doc,
+                        })),
                     }
                 })
                 .collect();
