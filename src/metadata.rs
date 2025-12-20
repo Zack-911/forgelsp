@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future;
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::{
@@ -19,6 +20,8 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+
+use crate::utils::Event;
 
 // ==============================
 // 📦 Data Model
@@ -53,6 +56,23 @@ impl Function {
                     name.push_str("...");
                 }
                 name.push_str(&a.name);
+
+                // Add type info
+                let type_str = match &a.arg_type {
+                    JsonValue::String(s) => s.clone(),
+                    JsonValue::Array(arr) => arr
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("?").to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    _ => "Any".to_string(),
+                };
+
+                if !type_str.is_empty() {
+                    name.push_str(": ");
+                    name.push_str(&type_str);
+                }
+
                 if a.required == Some(false) {
                     name.push('?');
                 }
@@ -109,20 +129,20 @@ impl Fetcher {
         self.cache_dir.join(format!("{safe}.json"))
     }
 
-    pub async fn fetch_or_cache(&self, url: &str) -> Result<Functions> {
+    pub async fn fetch_or_cache<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         let path = self.cache_path(url);
 
         match self.http.get(url).send().await {
             Ok(resp) => {
                 let body = resp.text().await?;
                 fs::write(&path, &body)?;
-                let parsed: Functions = serde_json::from_str(&body)?;
+                let parsed: T = serde_json::from_str(&body)?;
                 Ok(parsed)
             }
             Err(_err) => {
                 if path.exists() {
                     let data = fs::read_to_string(&path)?;
-                    let parsed: Functions = serde_json::from_str(&data)?;
+                    let parsed: T = serde_json::from_str(&data)?;
                     Ok(parsed)
                 } else {
                     Err(anyhow!("No cache found for {url}"))
@@ -135,7 +155,7 @@ impl Fetcher {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
             let this = self.clone();
-            async move { this.fetch_or_cache(&u).await }
+            async move { this.fetch_or_cache::<Vec<Function>>(&u).await }
         });
         let results = future::join_all(tasks).await;
 
@@ -153,6 +173,43 @@ impl Fetcher {
         // Silently ignore failures - we have cached data as fallback
         let _ = fail_count;
 
+        Ok(out)
+    }
+
+    pub async fn fetch_all_enums(&self, urls: &[String]) -> Result<HashMap<String, Vec<String>>> {
+        let tasks = urls.iter().map(|u| {
+            let u = u.clone();
+            let this = self.clone();
+            async move {
+                this.fetch_or_cache::<HashMap<String, Vec<String>>>(&u)
+                    .await
+            }
+        });
+        let results = future::join_all(tasks).await;
+
+        let mut out = HashMap::new();
+        for r in results {
+            if let Ok(enums) = r {
+                out.extend(enums);
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn fetch_all_events(&self, urls: &[String]) -> Result<Vec<Event>> {
+        let tasks = urls.iter().map(|u| {
+            let u = u.clone();
+            let this = self.clone();
+            async move { this.fetch_or_cache::<Vec<Event>>(&u).await }
+        });
+        let results = future::join_all(tasks).await;
+
+        let mut out = Vec::new();
+        for r in results {
+            if let Ok(events) = r {
+                out.extend(events);
+            }
+        }
         Ok(out)
     }
 }
@@ -252,37 +309,63 @@ pub struct MetadataManager {
     fetcher: Fetcher,
     fetch_urls: Vec<String>,
     trie: Arc<RwLock<FunctionTrie>>,
+    pub enums: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub events: Arc<RwLock<Vec<Event>>>,
 }
 
 impl MetadataManager {
     pub async fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
         let fetcher = Fetcher::new(cache_dir);
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
+        let enums = Arc::new(RwLock::new(HashMap::new()));
+        let events = Arc::new(RwLock::new(Vec::new()));
 
         Ok(Self {
             fetcher,
             fetch_urls,
             trie,
+            enums,
+            events,
         })
     }
 
     pub async fn load_all(&self) -> Result<()> {
         let all_funcs = self.fetcher.fetch_all(&self.fetch_urls).await?;
 
-        let mut trie = self.trie.write().unwrap();
-        for func in all_funcs {
-            if let Some(aliases) = &func.aliases {
-                for alias in aliases {
-                    let mut alias_func = func.clone();
-                    alias_func.name = alias.clone();
-                    let arc_alias_func = Arc::new(alias_func);
-                    trie.insert(alias, arc_alias_func);
+        {
+            let mut trie = self.trie.write().unwrap();
+            for func in all_funcs {
+                if let Some(aliases) = &func.aliases {
+                    for alias in aliases {
+                        let mut alias_func = func.clone();
+                        alias_func.name = alias.clone();
+                        let arc_alias_func = Arc::new(alias_func);
+                        trie.insert(alias, arc_alias_func);
+                    }
                 }
-            }
 
-            let arc_func = Arc::new(func);
-            trie.insert(&arc_func.name, arc_func.clone());
+                let arc_func = Arc::new(func);
+                trie.insert(&arc_func.name, arc_func.clone());
+            }
         }
+
+        // Fetch Enums and Events
+        let mut enum_urls = Vec::new();
+        let mut event_urls = Vec::new();
+
+        for url in &self.fetch_urls {
+            if url.ends_with("functions.json") {
+                enum_urls.push(url.replace("functions.json", "enums.json"));
+                event_urls.push(url.replace("functions.json", "events.json"));
+            }
+        }
+
+        let all_enums = self.fetcher.fetch_all_enums(&enum_urls).await?;
+        *self.enums.write().unwrap() = all_enums;
+
+        let all_events = self.fetcher.fetch_all_events(&event_urls).await?;
+        *self.events.write().unwrap() = all_events;
+
         Ok(())
     }
 

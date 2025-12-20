@@ -52,6 +52,15 @@ pub struct CustomFunction {
     pub alias: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Event {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    #[serde(default)]
+    pub intents: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ForgeConfig {
     pub urls: Vec<String>,
