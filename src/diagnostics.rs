@@ -16,16 +16,24 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url}
 /// # Returns
 /// LSP Position with 0-indexed line and character numbers
 fn offset_to_position(text: &str, offset: usize) -> Position {
-    // Count newlines up to the offset for line number
-    let line = text[..offset].matches('\n').count() as u32;
+    let mut line = 0;
+    let mut col = 0;
 
-    // Find the last newline before offset, or use 0 if none exists
-    // Character position is offset minus the position after the last newline
-    let char_in_line = offset - text[..offset].rfind('\n').unwrap_or(0);
+    for (i, c) in text.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += c.len_utf16() as u32;
+        }
+    }
 
     Position {
         line,
-        character: char_in_line as u32,
+        character: col,
     }
 }
 

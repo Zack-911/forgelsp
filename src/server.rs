@@ -76,6 +76,22 @@ impl ForgeScriptServer {
         let mgr = self.manager.read().unwrap();
         mgr.all_functions()
     }
+
+    /// Convert UTF-16 character offset to byte offset for a line
+    fn get_byte_offset(line: &str, utf16_col: u32) -> usize {
+        let mut col = 0;
+        for (i, c) in line.char_indices() {
+            if col == utf16_col {
+                return i;
+            }
+            col += c.len_utf16() as u32;
+        }
+        if col == utf16_col {
+            return line.len();
+        }
+        // Fallback to clamping to line length if out of bounds
+        line.len()
+    }
 }
 
 #[async_trait]
@@ -252,7 +268,9 @@ impl LanguageServer for ForgeScriptServer {
         if let Some(text) = text {
             let lines: Vec<&str> = text.lines().collect();
             let line = lines.get(position.line as usize).unwrap_or(&"");
-            let before_cursor = &line[..position.character as usize];
+
+            let byte_offset = Self::get_byte_offset(line, position.character);
+            let before_cursor = &line[..byte_offset];
 
             if let Some(last_dollar_idx) = before_cursor.rfind('$') {
                 let after_dollar = &before_cursor[last_dollar_idx + 1..];
@@ -322,7 +340,8 @@ impl LanguageServer for ForgeScriptServer {
                 text_up_to_cursor.push_str(line);
                 text_up_to_cursor.push('\n');
             } else if i == position.line as usize {
-                let slice = &line[..position.character.min(line.len() as u32) as usize];
+                let byte_offset = Self::get_byte_offset(line, position.character);
+                let slice = &line[..byte_offset];
                 text_up_to_cursor.push_str(slice);
                 break;
             }

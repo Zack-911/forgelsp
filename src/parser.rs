@@ -774,7 +774,9 @@ impl<'a> ForgeScriptParser<'a> {
                     let token_end = used_name_end;
 
                     // parse args if any
+                    // parse args if any
                     let mut args_text: Option<&str> = None;
+                    let mut args_start_offset = 0;
 
                     // Check for brackets ONLY if we consumed the full name (no suffix)
                     // If there is a suffix (e.g. $pingms -> $ping), we treat 'ms' as text,
@@ -792,6 +794,7 @@ impl<'a> ForgeScriptParser<'a> {
                         if let Some(&(i, '[')) = iter.peek() {
                             if let Some(end_idx) = find_matching_bracket(self.code, i) {
                                 args_text = Some(&self.code[i + 1..end_idx]);
+                                args_start_offset = i + 1;
                                 while let Some(&(j, _)) = iter.peek() {
                                     if j <= end_idx {
                                         iter.next();
@@ -836,7 +839,12 @@ impl<'a> ForgeScriptParser<'a> {
                     if let Some(inner) = args_text {
                         // ... args parsing logic ...
                         if meta.brackets.is_some() {
-                            match parse_nested_args(inner, self.manager.clone()) {
+                            match parse_nested_args(
+                                inner,
+                                self.manager.clone(),
+                                &mut diagnostics,
+                                args_start_offset,
+                            ) {
                                 Ok(args_vec) => {
                                     parsed_args = Some(args_vec.clone());
                                     validate_arg_count(
@@ -1150,6 +1158,8 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
 fn parse_nested_args(
     input: &str,
     manager: Arc<MetadataManager>,
+    diagnostics: &mut Vec<Diagnostic>,
+    base_offset: usize,
 ) -> Result<Vec<SmallVec<[ParsedArg; 8]>>, nom::Err<()>> {
     let mut args = Vec::new();
     let mut current = String::new();
@@ -1161,6 +1171,9 @@ fn parse_nested_args(
     // Collect char positions for UTF-8 safe iteration
     let char_positions: Vec<(usize, char)> = input.char_indices().collect();
     let mut char_idx = 0;
+
+    // Track where the current argument started in the input string (byte offset)
+    let mut arg_start_offset = 0;
 
     while char_idx < char_positions.len() {
         let (byte_idx, c) = char_positions[char_idx];
@@ -1224,11 +1237,17 @@ fn parse_nested_args(
             ';' if depth == 0 => {
                 seen_separator = true;
                 let trimmed = current.trim();
+                let leading_whitespace_len = current.len() - current.trim_start().len();
                 if !trimmed.is_empty() {
+                    // Calculate offset for the argument.
+                    // We use arg_start_offset + base_offset + leading_whitespace_len.
+
                     args.push(parse_single_arg(
                         trimmed,
                         manager.clone(),
                         first_char_escaped,
+                        diagnostics,
+                        base_offset + arg_start_offset + leading_whitespace_len,
                     )?);
                 } else {
                     args.push(smallvec![ParsedArg::Literal {
@@ -1239,6 +1258,13 @@ fn parse_nested_args(
                 first_char_escaped = false;
                 is_start_of_arg = true;
                 char_idx += 1;
+
+                // Update start offset for next arg
+                if char_idx < char_positions.len() {
+                    arg_start_offset = char_positions[char_idx].0;
+                } else {
+                    arg_start_offset = input.len();
+                }
             }
             _ => {
                 current.push(c);
@@ -1255,11 +1281,14 @@ fn parse_nested_args(
     // or if there's any content remaining
     if seen_separator || !current.is_empty() {
         let trimmed = current.trim();
+        let leading_whitespace_len = current.len() - current.trim_start().len();
         if !trimmed.is_empty() {
             args.push(parse_single_arg(
                 trimmed,
                 manager.clone(),
                 first_char_escaped,
+                diagnostics,
+                base_offset + arg_start_offset + leading_whitespace_len,
             )?);
         } else {
             args.push(smallvec![ParsedArg::Literal {
@@ -1275,11 +1304,21 @@ fn parse_single_arg(
     input: &str,
     manager: Arc<MetadataManager>,
     force_literal: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+    base_offset: usize,
 ) -> Result<SmallVec<[ParsedArg; 8]>, nom::Err<()>> {
     if !force_literal && input.starts_with('$') {
         // Use new_internal to parse directly without code block extraction
         let parser = ForgeScriptParser::new_internal(manager.clone(), input);
         let res = parser.parse_internal();
+
+        // Propagate diagnostics from the inner parser
+        for mut diag in res.diagnostics {
+            diag.start += base_offset;
+            diag.end += base_offset;
+            diagnostics.push(diag);
+        }
+
         if let Some(f) = res.functions.first() {
             Ok(smallvec![ParsedArg::Function {
                 func: Box::new(f.clone())

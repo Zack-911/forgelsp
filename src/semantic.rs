@@ -394,7 +394,7 @@ fn offset_to_position(text: &str, offset: usize) -> Position {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
     }
 

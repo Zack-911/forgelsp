@@ -37,6 +37,33 @@ fn is_escaped(text: &str, byte_idx: usize) -> bool {
     backslash_count % 2 == 1
 }
 
+/// Convert LSP Position (line, character) to byte offset.
+/// Handles UTF-16 character counts correctly.
+fn position_to_offset(text: &str, position: Position) -> Option<usize> {
+    let mut current_offset = 0;
+    let mut current_line = 0;
+
+    for line in text.split_inclusive('\n') {
+        if current_line == position.line {
+            let mut col = 0;
+            for (i, c) in line.char_indices() {
+                if col == position.character {
+                    return Some(current_offset + i);
+                }
+                col += c.len_utf16() as u32;
+            }
+            // Check if position is at the end of the line (e.g. after last char)
+            if col == position.character {
+                return Some(current_offset + line.len());
+            }
+            return None;
+        }
+        current_offset += line.len();
+        current_line += 1;
+    }
+    None
+}
+
 /// Handles hover requests for ForgeScript
 pub async fn handle_hover(
     server: &ForgeScriptServer,
@@ -56,7 +83,7 @@ pub async fn handle_hover(
         let docs = server.documents.read().unwrap();
         match docs.get(&uri) {
             Some(t) => t.clone(),
-            None => {
+            _ => {
                 spawn_log(
                     server.client.clone(),
                     MessageType::WARNING,
@@ -67,20 +94,11 @@ pub async fn handle_hover(
         }
     };
 
-    // Calculate byte offset
-    let mut offset = 0usize;
-    for (line_idx, line) in text.split_inclusive('\n').enumerate() {
-        if line_idx as u32 == position.line {
-            offset += position.character as usize;
-            break;
-        } else {
-            offset += line.len();
-        }
-    }
-
-    if offset >= text.len() {
-        return Ok(None);
-    }
+    // Calculate byte offset safely handling UTF-16 positions
+    let offset = match position_to_offset(&text, position) {
+        Some(o) => o,
+        _ => return Ok(None),
+    };
 
     // Include modifier characters in the initial token capture
     let is_ident_char = |c: char| {
@@ -94,28 +112,83 @@ pub async fn handle_hover(
             || c == '['
             || c == ']'
     };
-    let bytes = text.as_bytes();
 
-    // Find start of token, skipping escaped $ characters
-    let mut start_pos = offset;
-    while start_pos > 0 && is_ident_char(bytes[start_pos - 1] as char) {
-        // If we hit a $, check if it's escaped
-        if bytes[start_pos - 1] == b'$' && is_escaped(&text, start_pos - 1) {
+    // Find start of token
+    let indices: Vec<(usize, char)> = text.char_indices().collect();
+
+    // Find the index in the char_indices vector that corresponds to our byte offset
+    let mut current_char_idx = indices.len();
+    for (idx, (byte_pos, _)) in indices.iter().enumerate() {
+        if *byte_pos >= offset {
+            current_char_idx = idx;
             break;
         }
-        start_pos -= 1;
     }
 
-    let mut end = offset;
-    while end < bytes.len() && is_ident_char(bytes[end] as char) {
-        end += 1;
+    // Scan backwards
+    let mut start_char_idx = current_char_idx;
+    while start_char_idx > 0 {
+        let (byte_pos, c) = indices[start_char_idx - 1];
+        if is_ident_char(c) {
+            // Check if we hit a $ (start of function)
+            if c == '$' && !is_escaped(&text, byte_pos) {
+                // We found the start! Include it and stop.
+                start_char_idx -= 1;
+                break;
+            }
+            start_char_idx -= 1;
+        } else {
+            break;
+        }
     }
 
-    if start_pos >= end {
+    // Scan forwards
+    let mut end_char_idx = current_char_idx;
+    while end_char_idx < indices.len() {
+        let (byte_pos, c) = indices[end_char_idx];
+        if is_ident_char(c) {
+            // If we hit a $ (start of NEXT function), stop.
+            // But if it's the start of THIS function (which we might be on), we continue.
+            // We are scanning forwards from current_char_idx.
+            // If current_char_idx is on $, we want to include it.
+            // If we encounter ANOTHER $, we stop.
+
+            if c == '$' && !is_escaped(&text, byte_pos) {
+                // If this is the start of the token we are currently building, we keep it.
+                // But wait, we already found start_char_idx.
+                // If end_char_idx == start_char_idx, it's the same $.
+                // But end_char_idx starts at current_char_idx.
+                // start_char_idx is <= current_char_idx.
+
+                // If we are at the very beginning of the scan and it's a $, it's fine.
+                // But if we have already consumed some chars, and we see a $, it's a new function.
+
+                // Actually, simpler:
+                // We know start_char_idx points to the leading $.
+                // Any SUBSEQUENT unescaped $ is a new function.
+
+                if end_char_idx > start_char_idx {
+                    break;
+                }
+            }
+            end_char_idx += 1;
+        } else {
+            break;
+        }
+    }
+
+    if start_char_idx >= end_char_idx {
         return Ok(None);
     }
 
-    let raw_token = text[start_pos..end].to_string();
+    let start_byte = indices[start_char_idx].0;
+    let end_byte = if end_char_idx < indices.len() {
+        indices[end_char_idx].0
+    } else {
+        text.len()
+    };
+
+    let raw_token = text[start_byte..end_byte].to_string();
 
     // Don't provide hover for escape functions or JavaScript expressions
     if raw_token == "$esc" || raw_token == "$escape" {
