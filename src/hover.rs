@@ -154,19 +154,6 @@ pub async fn handle_hover(
             // If we encounter ANOTHER $, we stop.
 
             if c == '$' && !is_escaped(&text, byte_pos) {
-                // If this is the start of the token we are currently building, we keep it.
-                // But wait, we already found start_char_idx.
-                // If end_char_idx == start_char_idx, it's the same $.
-                // But end_char_idx starts at current_char_idx.
-                // start_char_idx is <= current_char_idx.
-
-                // If we are at the very beginning of the scan and it's a $, it's fine.
-                // But if we have already consumed some chars, and we see a $, it's a new function.
-
-                // Actually, simpler:
-                // We know start_char_idx points to the leading $.
-                // Any SUBSEQUENT unescaped $ is a new function.
-
                 if end_char_idx > start_char_idx {
                     break;
                 }
