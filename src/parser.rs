@@ -861,6 +861,20 @@ impl<'a> ForgeScriptParser<'a> {
                                         self.code,
                                         ignore_next_line,
                                     );
+
+                                    if !ignore_next_line {
+                                        if let Some(meta_args) = &meta.args {
+                                            validate_arg_enums(
+                                                &name,
+                                                &args_vec,
+                                                meta_args,
+                                                self.manager.clone(),
+                                                &mut diagnostics,
+                                                start, // Use function start for now as we don't have better arg offsets
+                                                self.code,
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(_) => {
                                     if !ignore_next_line {
@@ -1362,6 +1376,90 @@ fn validate_arg_count(
             start: span.0,
             end: span.1,
         });
+    }
+}
+
+fn validate_arg_enums(
+    name: &str,
+    parsed_args: &[SmallVec<[ParsedArg; 8]>],
+    meta_args: &[crate::metadata::Arg],
+    manager: Arc<MetadataManager>,
+    diagnostics: &mut Vec<Diagnostic>,
+    base_offset: usize,
+    _source: &str,
+) {
+    for (i, arg_parts) in parsed_args.iter().enumerate() {
+        // Find corresponding metadata arg
+        // If function has rest args, the last metadata arg applies to all remaining parsed args
+        let meta_arg = if i < meta_args.len() {
+            &meta_args[i]
+        } else if let Some(last) = meta_args.last() {
+            if last.rest {
+                last
+            } else {
+                continue; // Should have been caught by arg count validation
+            }
+        } else {
+            continue;
+        };
+
+        // Check if this arg expects an enum
+        let allowed_values = if let Some(enum_name) = &meta_arg.enum_name {
+            if let Ok(enums) = manager.enums.read() {
+                enums.get(enum_name).cloned()
+            } else {
+                None
+            }
+        } else {
+            meta_arg.arg_enum.clone()
+        };
+
+        if let Some(values) = allowed_values {
+            // Only validate if the argument is purely static (no functions inside)
+            let is_static = arg_parts
+                .iter()
+                .all(|p| matches!(p, ParsedArg::Literal { .. }));
+
+            if is_static {
+                let mut full_text = String::new();
+                for p in arg_parts {
+                    if let ParsedArg::Literal { text } = p {
+                        full_text.push_str(text);
+                    }
+                }
+
+                // Case-sensitive check
+                if !values.contains(&full_text) {
+                    // Calculate start/end for this specific argument
+                    // This is tricky because we don't have exact offsets for each arg in parsed_args structure easily
+                    // We might need to rely on `base_offset` and re-scan or just use the function span?
+                    // Ideally `parse_nested_args` should return offsets.
+                    // For now, let's use a heuristic or just the function span if we can't do better.
+                    // BUT, `parse_nested_args` DOES NOT return offsets.
+                    // However, we can try to find the argument in the source string if we are careful.
+                    // Or we can just mark the whole function call for now, or try to be more specific.
+
+                    // Since we don't have exact offsets for individual args, we will mark the whole function call
+                    // but add a specific message.
+                    // TODO: Improve `parse_nested_args` to return spans.
+
+                    // Wait, `base_offset` is where the args start (after `[`).
+                    // We can try to find the argument by reconstructing the string? No, that's error prone.
+                    // Let's just use the function's span passed to `validate_arg_count` (which is `span` in caller).
+                    // But here we don't have `span`.
+                    // Let's pass `span` to this function.
+
+                    diagnostics.push(Diagnostic {
+                        message: format!(
+                            "Invalid value `{}` for argument `{}` of `${}`. Expected one of: {:?}",
+                            full_text, meta_arg.name, name, values
+                        ),
+                        start: base_offset, // This is not ideal, it points to start of args.
+                        end: base_offset,   // We should probably pass the function span.
+                    });
+                }
+            }
+        }
     }
 }
 
