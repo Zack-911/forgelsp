@@ -523,10 +523,63 @@ impl MetadataManager {
             let mut params = None;
             if let Some(p_cap) = params_re.captures(chunk) {
                 let p_content = &p_cap[1];
-                let p_json_str = format!("[{}]", p_content.replace('\'', "\""));
-                if let Ok(p_json) = serde_json::from_str::<JsonValue>(&p_json_str) {
-                    params = Some(p_json);
+                
+                // Try to parse individual objects in the array first
+                let mut param_objects = Vec::new();
+                let obj_re = regex::Regex::new(r#"(?s)\{(.*?)\}"#).unwrap();
+                
+                for obj_cap in obj_re.captures_iter(p_content) {
+                    let obj_body = &obj_cap[1];
+                    let mut obj_map = serde_json::Map::new();
+                    
+                    // Extract name (required for a valid param object)
+                    if let Some(n_cap) = p_name_re.captures(obj_body) {
+                        obj_map.insert("name".to_string(), JsonValue::String(n_cap[1].to_string()));
+                        
+                        // Extract required
+                        let required_re = regex::Regex::new(r#"required:\s*(true|false)"#).unwrap();
+                        if let Some(r_cap) = required_re.captures(obj_body) {
+                            obj_map.insert("required".to_string(), JsonValue::Bool(&r_cap[1] == "true"));
+                        }
+                        
+                        // Extract rest
+                        let rest_re = regex::Regex::new(r#"rest:\s*(true|false)"#).unwrap();
+                        if let Some(rest_cap) = rest_re.captures(obj_body) {
+                            obj_map.insert("rest".to_string(), JsonValue::Bool(&rest_cap[1] == "true"));
+                        }
+                        
+                        // Extract type
+                        let type_re = regex::Regex::new(r#"type:\s*([^,}\n\s]+)"#).unwrap();
+                        if let Some(t_cap) = type_re.captures(obj_body) {
+                            let t_val = t_cap[1].trim();
+                            let t_val_clean = t_val.trim_matches(|c| c == '\'' || c == '\"').to_string();
+                            let t_final = if t_val_clean.starts_with("ArgType.") {
+                                t_val_clean["ArgType.".len()..].to_string()
+                            } else {
+                                t_val_clean
+                            };
+                            obj_map.insert("type".to_string(), JsonValue::String(t_final));
+                        } else {
+                            // Default type if missing
+                            obj_map.insert("type".to_string(), JsonValue::String("String".to_string()));
+                        }
+                        
+                        // Extract description
+                        if let Some(d_cap) = desc_double_re.captures(obj_body)
+                            .or_else(|| desc_single_re.captures(obj_body))
+                            .or_else(|| desc_backtick_re.captures(obj_body))
+                        {
+                            obj_map.insert("description".to_string(), JsonValue::String(d_cap[1].to_string()));
+                        }
+                        
+                        param_objects.push(JsonValue::Object(obj_map));
+                    }
+                }
+                
+                if !param_objects.is_empty() {
+                    params = Some(JsonValue::Array(param_objects));
                 } else {
+                    // Fallback to simple name list (e.g. params: ["arg1", "arg2"])
                     let mut names = Vec::new();
                     for p_cap in p_name_re.captures_iter(p_content) {
                         names.push(p_cap[1].to_string());
