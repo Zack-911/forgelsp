@@ -9,10 +9,17 @@
 //! - Comment detection (`$c[...]`)
 //! - Escape function special handling (`$esc`, `$escapeCode`)
 //! - Number, boolean, and semicolon highlighting
+use std::sync::{Arc, LazyLock};
+
+use regex::Regex;
+use tower_lsp::lsp_types::*;
 
 use crate::metadata::MetadataManager;
-use std::sync::Arc;
-use tower_lsp::lsp_types::{Position, SemanticToken};
+
+/// Regex for extracting code blocks from ForgeScript files.
+static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?s)code:\s*`((?:[^`\\]|\\.)*)`").expect("Semantic: regex compile failed")
+});
 
 /// Token types:
 /// 0 = FUNCTION (normal functions)
@@ -21,7 +28,11 @@ use tower_lsp::lsp_types::{Position, SemanticToken};
 /// 3 = PARAMETER (alternating function color)
 /// 4 = STRING (escape function content)
 /// 5 = COMMENT (comments)
-/// Check if a character is escaped
+/// Checks if a character at the given index is escaped by a backslash.
+///
+/// Handles:
+/// - Backtick escape: \` (requires 1 backslash)
+/// - Special characters ($, ;, [, ]): require 2 backslashes for escaping
 fn is_char_escaped(bytes: &[u8], idx: usize) -> bool {
     if idx == 0 {
         return false;
@@ -68,7 +79,10 @@ fn is_char_escaped(bytes: &[u8], idx: usize) -> bool {
     false
 }
 
-/// Find matching bracket (raw, no escape handling)
+/// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
+///
+/// This version does not handle escape sequences and is used for raw content
+/// like comments and escape functions.
 fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, &byte) in code.iter().enumerate().skip(open_idx) {
@@ -84,7 +98,16 @@ fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
     None
 }
 
-/// Extract tokens with optional multi-color function highlighting
+/// Extracts semantic tokens from ForgeScript source code, optionally using
+/// alternating colors for function calls.
+///
+/// # Arguments
+/// * `source` - The complete source code to analyze.
+/// * `use_function_colors` - Whether to use different token types for alternating functions.
+/// * `manager` - Shared metadata manager for function validation.
+///
+/// # Returns
+/// A list of relative semantic tokens as defined by the LSP specification.
 pub fn extract_semantic_tokens_with_colors(
     source: &str,
     use_function_colors: bool,
@@ -92,12 +115,7 @@ pub fn extract_semantic_tokens_with_colors(
 ) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
 
-    // Extract code blocks manually (handle escaped backticks)
-    // Extract code blocks using regex (handles escaped backticks and UTF-8 correctly)
-    // Pattern: code: ` ... ` where backticks can be escaped with \`
-    let re = regex::Regex::new(r"(?s)code:\s*`((?:[^`\\]|\\.)*)`").unwrap();
-
-    for cap in re.captures_iter(source) {
+    for cap in CODE_BLOCK_RE.captures_iter(source) {
         if let Some(match_group) = cap.get(1) {
             let content_start = match_group.start();
             let code = match_group.as_str();
@@ -112,6 +130,7 @@ pub fn extract_semantic_tokens_with_colors(
     to_relative_tokens(&tokens, source)
 }
 
+/// Internal helper to extract tokens from a specific code block.
 fn extract_tokens_from_code(
     code: &str,
     code_start: usize,
@@ -237,7 +256,7 @@ fn extract_tokens_from_code(
                 };
 
                 if let Some(full_name) = code.get(name_start_byte_idx..end_byte_idx) {
-                    let lookup_key = format!("${}", full_name);
+                    let lookup_key = format!("${full_name}");
                     if manager.get_exact(&lookup_key).is_some() {
                         best_match_len = end_byte_idx - i;
                         best_match_char_count = name_end_char_idx - idx;
@@ -255,7 +274,7 @@ fn extract_tokens_from_code(
                     };
 
                     if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
-                        let lookup_key = format!("${}", name_part);
+                        let lookup_key = format!("${name_part}");
                         if manager.get_exact(&lookup_key).is_some() {
                             best_match_len = end_byte_idx - i;
                             best_match_char_count = check_idx - idx;
@@ -326,6 +345,9 @@ fn extract_tokens_from_code(
     found
 }
 
+/// Checks if the function at `dollar_idx` is an escape function ($esc or $escapeCode).
+///
+/// Returns the byte offset of the closing bracket if it is, otherwise None.
 fn check_escape_function(bytes: &[u8], dollar_idx: usize) -> Option<usize> {
     if dollar_idx >= bytes.len() || bytes[dollar_idx] != b'$' {
         return None;
@@ -350,6 +372,7 @@ fn check_escape_function(bytes: &[u8], dollar_idx: usize) -> Option<usize> {
     None
 }
 
+/// Converts absolute token positions into relative positions required by the LSP.
 fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
     let mut last_line = 0u32;
@@ -381,7 +404,9 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
     tokens
 }
 
-/// Convert byte offset to LSP position (line, column)
+/// Converts a byte offset within a string to an LSP Position (line and character).
+///
+/// Handles multi-byte characters and line endings.
 fn offset_to_position(text: &str, offset: usize) -> Position {
     let mut line = 0u32;
     let mut col = 0u32;
@@ -448,7 +473,7 @@ mod tests {
         }
 
         // Clean up
-        let _ = std::fs::remove_dir_all("./.cache_test");
+        let () = std::fs::remove_dir_all("./.cache_test").expect("Failed to clean up cache");
     }
 
     #[tokio::test]
@@ -513,7 +538,8 @@ mod tests {
         }
 
         // Clean up
-        let _ = std::fs::remove_dir_all("./.cache_test_semantic");
+        let () =
+            std::fs::remove_dir_all("./.cache_test_semantic").expect("Failed to clean up cache");
     }
 
     #[tokio::test]
@@ -532,6 +558,7 @@ mod tests {
         // Just checking it doesn't panic is enough for this test.
         assert!(tokens.is_empty() || !tokens.is_empty());
 
-        let _ = std::fs::remove_dir_all("./.cache_test_semantic_utf8");
+        let () = std::fs::remove_dir_all("./.cache_test_semantic_utf8")
+            .expect("Failed to clean up cache");
     }
 }

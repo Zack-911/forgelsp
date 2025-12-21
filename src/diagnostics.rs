@@ -5,7 +5,7 @@
 
 use crate::parser::Diagnostic as ParseDiagnostic;
 use crate::server::ForgeScriptServer;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Url};
+use tower_lsp::lsp_types::*;
 
 /// Converts a byte offset in the source text to an LSP Position (line, character).
 ///

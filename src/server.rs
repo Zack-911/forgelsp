@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::diagnostics::publish_diagnostics;
 use crate::hover::handle_hover;
@@ -21,7 +21,16 @@ use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
 use crate::utils::{load_forge_config_full, spawn_log};
 use regex::Regex;
-use tower_lsp::{Client, LanguageServer, async_trait, jsonrpc::Result, lsp_types::*};
+use tower_lsp::Client;
+use tower_lsp::LanguageServer;
+use tower_lsp::async_trait;
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
+
+/// Regex for identifying ForgeScript functions in signature help.
+static SIGNATURE_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").expect("Server: regex compile failed")
+});
 
 /// ForgeScript Language Server
 ///
@@ -39,17 +48,21 @@ pub struct ForgeScriptServer {
 }
 
 impl ForgeScriptServer {
-    /// Parses text and updates the diagnostic cache
+    /// Analyzes the text content of a document and publishes diagnostics.
     pub async fn process_text(&self, uri: Url, text: String) {
         let start = std::time::Instant::now();
 
-        let mgr_arc = self.manager.read().unwrap().clone();
+        let mgr_arc = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let parser = ForgeScriptParser::new(mgr_arc, &text);
         let parsed = parser.parse();
 
         self.parsed_cache
             .write()
-            .unwrap()
+            .expect("Server: parsed_cache lock poisoned")
             .insert(uri.clone(), parsed.clone());
 
         publish_diagnostics(self, &uri, &text, &parsed.diagnostics).await;
@@ -60,21 +73,22 @@ impl ForgeScriptServer {
                 self.client.clone(),
                 MessageType::WARNING,
                 format!(
-                    "[WARN] Found {} diagnostics in {:?}",
-                    diag_count,
-                    start.elapsed()
+                    "[WARN] Found {diag_count} diagnostics in {elapsed:?}",
+                    elapsed = start.elapsed()
                 ),
             );
         }
     }
 
+    /// Returns the total number of functions managed by the server.
     pub fn function_count(&self) -> usize {
-        let mgr = self.manager.read().unwrap();
+        let mgr = self.manager.read().expect("Server: manager lock poisoned");
         mgr.function_count()
     }
 
+    /// Returns a list of all functions managed by the server.
     pub fn all_functions(&self) -> Vec<Arc<crate::metadata::Function>> {
-        let mgr = self.manager.read().unwrap();
+        let mgr = self.manager.read().expect("Server: manager lock poisoned");
         mgr.all_functions()
     }
 
@@ -103,7 +117,13 @@ impl LanguageServer for ForgeScriptServer {
                 .into_iter()
                 .filter_map(|f| f.uri.to_file_path().ok())
                 .collect::<Vec<_>>();
-            (*self.workspace_folders.write().unwrap()).clone_from(&paths);
+            {
+                let mut ws_folders = self
+                    .workspace_folders
+                    .write()
+                    .expect("Server: workspace_folders lock poisoned");
+                (*ws_folders).clone_from(&paths);
+            }
 
             if let Some(config) = load_forge_config_full(&paths) {
                 let urls = config.urls.clone();
@@ -127,14 +147,14 @@ impl LanguageServer for ForgeScriptServer {
                     spawn_log(
                         self.client.clone(),
                         MessageType::INFO,
-                        format!("[INFO] Custom functions path from config: {}", custom_path),
+                        format!("[INFO] Custom functions path from config: {custom_path}"),
                     );
                     for folder in &paths {
                         let path = folder.join(&custom_path);
                         spawn_log(
                             self.client.clone(),
                             MessageType::INFO,
-                            format!("[INFO] Searching for custom functions in: {:?}", path),
+                            format!("[INFO] Searching for custom functions in: {path:?}"),
                         );
                         if path.exists() {
                             match manager.load_custom_functions_from_folder(path) {
@@ -143,16 +163,15 @@ impl LanguageServer for ForgeScriptServer {
                                         self.client.clone(),
                                         MessageType::INFO,
                                         format!(
-                                            "[INFO] Found {} .js/.ts files, registered {} custom functions",
-                                            files.len(),
-                                            count
+                                            "[INFO] Found {files_count} .js/.ts files, registered {count} custom functions",
+                                            files_count = files.len()
                                         ),
                                     );
                                     for f in files {
                                         spawn_log(
                                             self.client.clone(),
                                             MessageType::INFO,
-                                            format!("[INFO] Parsed file: {:?}", f),
+                                            format!("[INFO] Parsed file: {f:?}"),
                                         );
                                     }
                                 }
@@ -160,7 +179,9 @@ impl LanguageServer for ForgeScriptServer {
                                     spawn_log(
                                         self.client.clone(),
                                         MessageType::ERROR,
-                                        format!("[ERROR] Failed to load custom functions from folder: {}", e),
+                                        format!(
+                                            "[ERROR] Failed to load custom functions from folder: {e}"
+                                        ),
                                     );
                                 }
                             }
@@ -168,17 +189,20 @@ impl LanguageServer for ForgeScriptServer {
                             spawn_log(
                                 self.client.clone(),
                                 MessageType::WARNING,
-                                format!("[WARN] Custom functions path does not exist: {:?}", path),
+                                format!("[WARN] Custom functions path does not exist: {path:?}"),
                             );
                         }
                     }
                 }
 
-                *self.manager.write().unwrap() = Arc::new(manager);
+                *self.manager.write().expect("Server: manager lock poisoned") = Arc::new(manager);
 
                 // Load function color highlighting setting
                 if let Some(use_colors) = config.multiple_function_colors {
-                    *self.multiple_function_colors.write().unwrap() = use_colors;
+                    *self
+                        .multiple_function_colors
+                        .write()
+                        .expect("Server: multiple_function_colors lock poisoned") = use_colors;
                 }
             }
         }
@@ -262,7 +286,7 @@ impl LanguageServer for ForgeScriptServer {
                             kind: Some(WatchKind::all()),
                         }],
                     })
-                    .unwrap(),
+                    .expect("Server: failed to serialize watch options"),
                 ),
             }])
             .await
@@ -295,9 +319,8 @@ impl LanguageServer for ForgeScriptServer {
             self.client.clone(),
             MessageType::LOG,
             format!(
-                "[PERF] did_open: {} chars in {:?}",
-                text_len,
-                start.elapsed()
+                "[PERF] did_open: {text_len} chars in {elapsed:?}",
+                elapsed = start.elapsed()
             ),
         );
     }
@@ -312,7 +335,7 @@ impl LanguageServer for ForgeScriptServer {
 
             self.documents
                 .write()
-                .unwrap()
+                .expect("Server: documents lock poisoned")
                 .insert(uri.clone(), text.clone());
 
             self.process_text(uri, text).await;
@@ -321,9 +344,8 @@ impl LanguageServer for ForgeScriptServer {
                 self.client.clone(),
                 MessageType::LOG,
                 format!(
-                    "[PERF] did_change: {} chars in {:?}",
-                    text_len,
-                    start.elapsed()
+                    "[PERF] did_change: {text_len} chars in {elapsed:?}",
+                    elapsed = start.elapsed()
                 ),
             );
         }
@@ -338,7 +360,10 @@ impl LanguageServer for ForgeScriptServer {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let docs = self.documents.read().unwrap();
+        let docs = self
+            .documents
+            .read()
+            .expect("Server: documents lock poisoned");
         let text = docs.get(&uri);
 
         if let Some(text) = text {
@@ -364,7 +389,7 @@ impl LanguageServer for ForgeScriptServer {
                     .map(|f| {
                         let base = f.name.clone();
                         let name = if !modifier.is_empty() && base.starts_with('$') {
-                            format!("${}{}", modifier, &base[1..])
+                            format!("${modifier}{}", &base[1..])
                         } else {
                             base.clone()
                         };
@@ -386,9 +411,9 @@ impl LanguageServer for ForgeScriptServer {
                     self.client.clone(),
                     MessageType::LOG,
                     format!(
-                        "[PERF] completion: {} items in {:?}",
-                        items.len(),
-                        start.elapsed()
+                        "[PERF] completion: {count} items in {elapsed:?}",
+                        count = items.len(),
+                        elapsed = start.elapsed()
                     ),
                 );
                 return Ok(Some(CompletionResponse::Array(items)));
@@ -404,7 +429,10 @@ impl LanguageServer for ForgeScriptServer {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let docs = self.documents.read().unwrap();
+        let docs = self
+            .documents
+            .read()
+            .expect("Server: documents lock poisoned");
         let Some(text) = docs.get(&uri) else {
             return Ok(None);
         };
@@ -453,13 +481,14 @@ impl LanguageServer for ForgeScriptServer {
 
         // Extract the function name before the '['
         let before_bracket = &text_up_to_cursor[..open_index];
-        let func_re = Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").unwrap();
-
-        let Some(caps) = func_re.captures(before_bracket) else {
+        let Some(caps) = SIGNATURE_FUNC_RE.captures(before_bracket) else {
             return Ok(None);
         };
 
-        let func_name = caps.get(1).unwrap().as_str();
+        let func_name = caps
+            .get(1)
+            .expect("Server: signature regex capture group missing")
+            .as_str();
 
         // Compute active parameter index
         let start_scan = open_index + 1;
@@ -512,7 +541,11 @@ impl LanguageServer for ForgeScriptServer {
         }
 
         // Look up metadata and return signature help
-        let mgr = self.manager.read().unwrap().clone();
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let lookup = format!("${func_name}");
 
         if let Some(func) = mgr.get(&lookup) {
@@ -532,7 +565,12 @@ impl LanguageServer for ForgeScriptServer {
                     let mut doc = a.description.clone();
 
                     if let Some(enum_name) = &a.enum_name {
-                        if let Some(values) = mgr.enums.read().unwrap().get(enum_name) {
+                        if let Some(values) = mgr
+                            .enums
+                            .read()
+                            .expect("Server: enums lock poisoned")
+                            .get(enum_name)
+                        {
                             doc.push_str(&format!("\n\n**{enum_name}**:\n"));
                             for v in values {
                                 doc.push_str(&format!("- {v}\n"));
@@ -571,9 +609,8 @@ impl LanguageServer for ForgeScriptServer {
                 self.client.clone(),
                 MessageType::LOG,
                 format!(
-                    "[PERF] signature_help: ${} in {:?}",
-                    func_name,
-                    start.elapsed()
+                    "[PERF] signature_help: ${func_name} in {elapsed:?}",
+                    elapsed = start.elapsed()
                 ),
             );
 
@@ -594,23 +631,33 @@ impl LanguageServer for ForgeScriptServer {
         let start = std::time::Instant::now();
         let uri = params.text_document.uri;
 
-        let docs = self.documents.read().unwrap();
+        let docs = self
+            .documents
+            .read()
+            .expect("Server: documents lock poisoned");
 
         let Some(text) = docs.get(&uri) else {
             return Ok(None);
         };
 
-        let use_colors = *self.multiple_function_colors.read().unwrap();
-        let mgr = self.manager.read().unwrap().clone();
+        let use_colors = *self
+            .multiple_function_colors
+            .read()
+            .expect("Server: multiple_function_colors lock poisoned");
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let tokens = extract_semantic_tokens_with_colors(text, use_colors, mgr);
 
         spawn_log(
             self.client.clone(),
             MessageType::LOG,
             format!(
-                "[PERF] semantic_tokens: {} tokens in {:?}",
-                tokens.len(),
-                start.elapsed()
+                "[PERF] semantic_tokens: {count} tokens in {elapsed:?}",
+                count = tokens.len(),
+                elapsed = start.elapsed()
             ),
         );
 
@@ -621,7 +668,11 @@ impl LanguageServer for ForgeScriptServer {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        let manager_outer = self.manager.read().unwrap().clone();
+        let manager_outer = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let manager = manager_outer.as_ref();
         for change in params.changes {
             if let Ok(path) = change.uri.to_file_path() {
@@ -632,8 +683,7 @@ impl LanguageServer for ForgeScriptServer {
                                 self.client.clone(),
                                 MessageType::INFO,
                                 format!(
-                                    "[INFO] Reloaded custom functions from {:?}: {} functions registered",
-                                    path, count
+                                    "[INFO] Reloaded custom functions from {path:?}: {count} functions registered"
                                 ),
                             );
                         }
@@ -643,7 +693,7 @@ impl LanguageServer for ForgeScriptServer {
                         spawn_log(
                             self.client.clone(),
                             MessageType::INFO,
-                            format!("[INFO] Removed custom functions from deleted file: {:?}", path),
+                            format!("[INFO] Removed custom functions from deleted file: {path:?}"),
                         );
                     }
                     _ => {}

@@ -13,16 +13,13 @@
 
 use crate::metadata::{Function, MetadataManager};
 use smallvec::{SmallVec, smallvec};
-use std::borrow::Cow;
 use std::sync::Arc;
 
 /// List of function name and argument index pairs that should skip enum validation.
 /// Some functions might have dynamic enum-like arguments that aren't strictly defined
 /// in the static metadata.
 /// Argument index starts from 0 not 1
-const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize)] = &[
-    ("color", 0),
-];
+const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize)] = &[("color", 0)];
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -42,15 +39,16 @@ pub enum TokenKind {
     Unknown,
 }
 
-#[derive(Debug, Clone)]
-pub struct Token<'a> {
-    #[allow(dead_code)]
+/// A token identified during the parsing process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Token {
+    /// The category of the token.
     pub kind: TokenKind,
-    #[allow(dead_code)]
-    pub text: &'a str,
-    #[allow(dead_code)]
+    /// The text content of the token.
+    pub text: String,
+    /// Starting byte offset in the source.
     pub start: usize,
-    #[allow(dead_code)]
+    /// Ending byte offset in the source.
     pub end: usize,
 }
 
@@ -74,22 +72,30 @@ pub struct ParsedFunction {
     pub meta: Arc<Function>,
 }
 
+/// The result of parsing a ForgeScript document.
 #[derive(Debug, Clone)]
 pub struct ParseResult {
-    #[allow(dead_code)]
-    pub tokens: Vec<Token<'static>>,
+    /// List of tokens identified in the document.
+    pub tokens: Vec<Token>,
+    /// List of syntax errors or warnings found during parsing.
     pub diagnostics: Vec<Diagnostic>,
+    /// List of successfully matched function calls.
     pub functions: Vec<ParsedFunction>,
 }
 
+/// Represents a single argument in a function call.
 #[derive(Debug, Clone)]
 pub enum ParsedArg {
+    /// A literal string argument.
     Literal {
-        #[allow(dead_code)]
-        text: Cow<'static, str>,
+        /// The text content of the argument.
+        text: String,
     },
-    #[allow(dead_code)]
-    Function { func: Box<ParsedFunction> },
+    /// A nested function call argument.
+    Function {
+        #[allow(dead_code)]
+        func: Box<ParsedFunction>,
+    },
 }
 
 /// Map a position in the concatenated code string back to the original block.
@@ -431,7 +437,7 @@ impl<'a> ForgeScriptParser<'a> {
                     if last_idx < idx {
                         tokens.push(Token {
                             kind: TokenKind::Text,
-                            text: Box::leak(self.code[last_idx..idx].to_string().into_boxed_str()),
+                            text: self.code[last_idx..idx].to_string(),
                             start: last_idx,
                             end: idx,
                         });
@@ -451,9 +457,7 @@ impl<'a> ForgeScriptParser<'a> {
                         if last_idx < idx {
                             tokens.push(Token {
                                 kind: TokenKind::Text,
-                                text: Box::leak(
-                                    self.code[last_idx..idx].to_string().into_boxed_str(),
-                                ),
+                                text: self.code[last_idx..idx].to_string(),
                                 start: last_idx,
                                 end: idx,
                             });
@@ -477,7 +481,7 @@ impl<'a> ForgeScriptParser<'a> {
 
                     tokens.push(Token {
                         kind: TokenKind::Text,
-                        text: Box::leak(self.code[idx..end_idx].to_string().into_boxed_str()),
+                        text: self.code[idx..end_idx].to_string(),
                         start: idx,
                         end: end_idx,
                     });
@@ -498,7 +502,7 @@ impl<'a> ForgeScriptParser<'a> {
                 if last_idx < idx {
                     tokens.push(Token {
                         kind: TokenKind::Text,
-                        text: Box::leak(self.code[last_idx..idx].to_string().into_boxed_str()),
+                        text: self.code[last_idx..idx].to_string(),
                         start: last_idx,
                         end: idx,
                     });
@@ -525,7 +529,7 @@ impl<'a> ForgeScriptParser<'a> {
                         // Create a JavaScript token
                         tokens.push(Token {
                             kind: TokenKind::JavaScript,
-                            text: Box::leak(js_content.to_string().into_boxed_str()),
+                            text: js_content.to_string(),
                             start,
                             end: last_idx,
                         });
@@ -556,19 +560,11 @@ impl<'a> ForgeScriptParser<'a> {
                         negated = true;
                         iter.next();
                     } else if next_c == '@' {
-                        // Handle @[...] modifier
-                        // We need to check if it's followed by '['
                         let mut lookahead = iter.clone();
                         lookahead.next(); // consume '@'
                         if let Some(&(_, '[')) = lookahead.peek() {
                             iter.next(); // consume '@'
                             iter.next(); // consume '['
-                            // Find matching bracket
-                            // We use find_matching_bracket_raw because modifiers usually don't support complex nesting/escaping
-                            // or at least semantic.rs uses find_matching_bracket_raw.
-                            // We need to consume the content of the modifier.
-
-                            // Since we are inside the iterator, we need to advance it manually.
                             let mut depth = 1;
                             for (_, c) in iter.by_ref() {
                                 if c == '[' {
@@ -581,7 +577,6 @@ impl<'a> ForgeScriptParser<'a> {
                                 }
                             }
                         } else {
-                            // @ not followed by [, treat as part of name (or stop modifier parsing)
                             break;
                         }
                     } else {
@@ -640,7 +635,7 @@ impl<'a> ForgeScriptParser<'a> {
                             // Create an escaped text token
                             tokens.push(Token {
                                 kind: TokenKind::Escaped,
-                                text: Box::leak(escaped_content.to_string().into_boxed_str()),
+                                text: escaped_content.to_string(),
                                 start,
                                 end: last_idx,
                             });
@@ -649,8 +644,7 @@ impl<'a> ForgeScriptParser<'a> {
                             if !ignore_next_line {
                                 diagnostics.push(Diagnostic {
                                     message: format!(
-                                        "Unclosed '[' for escape function `${}`",
-                                        full_name
+                                        "Unclosed '[' for escape function `${full_name}`",
                                     ),
                                     start,
                                     end: self.code.len(),
@@ -673,9 +667,7 @@ impl<'a> ForgeScriptParser<'a> {
                         }
                         tokens.push(Token {
                             kind: TokenKind::Unknown,
-                            text: Box::leak(
-                                self.code[start..full_name_end].to_string().into_boxed_str(),
-                            ),
+                            text: self.code[start..full_name_end].to_string(),
                             start,
                             end: full_name_end,
                         });
@@ -702,42 +694,6 @@ impl<'a> ForgeScriptParser<'a> {
                     let lookup_key = format!("${}", full_name);
                     // manager.get now returns Option<Arc<Function>> (exact match wrapper? No, wait)
                     // In metadata.rs, I changed get to return Option<Arc<Function>>?
-                    // Let me check metadata.rs content again.
-                    // I see:
-                    // pub fn get(&self, name: &str) -> Option<Arc<Function>> {
-                    //    let trie = self.trie.read().unwrap();
-                    //    trie.get(name).map(|(_, func)| func)
-                    // }
-                    // Ah! I changed the public API of MetadataManager::get to return only Arc<Function>!
-                    // But I need the matched name to know the prefix length!
-                    // The underlying Trie::get returns (String, Arc<Function>).
-                    // I should expose that or use a new method.
-
-                    // I will use the underlying trie logic or add a method to MetadataManager to get match info.
-                    // Or I can just revert the change in metadata.rs?
-                    // No, I added get_exact.
-                    // But I also changed get:
-                    // Before:
-                    // pub fn get(&self, name: &str) -> Option<Arc<Function>> { ... }
-                    // Wait, the original code had:
-                    // pub fn get(&self, name: &str) -> Option<Arc<Function>> { ... }
-                    // But Trie::get returns Option<(String, Arc<Function>)>.
-                    // So MetadataManager::get was ALREADY discarding the name.
-
-                    // So I need to add a method `get_with_match` to MetadataManager.
-
-                    // For now, I will assume I need to modify metadata.rs to expose the match name.
-                    // But I am in parser.rs.
-                    // I can't modify metadata.rs in this tool call easily without context switching.
-                    // But I must fix the error.
-
-                    // Let's modify metadata.rs to expose `get_with_match`.
-                    // But first I need to undo the broken code in parser.rs or fix it to use a new method.
-
-
-                    // I'll assume I'll add `get_with_match` to metadata.rs.
-                    // So I'll change parser.rs to use `get_with_match`.
-
                     if let Some((matched_name_with_prefix, func)) =
                         self.manager.get_with_match(&lookup_key)
                     {
@@ -745,12 +701,11 @@ impl<'a> ForgeScriptParser<'a> {
                         // we need the name without '$'
                         let matched_name = matched_name_with_prefix
                             .strip_prefix('$')
-                            .unwrap_or(&matched_name_with_prefix)
-                            .to_string();
+                            .unwrap_or(&matched_name_with_prefix);
 
                         // Check if it's a valid prefix of our full_name
-                        if full_name.to_lowercase().starts_with(&matched_name) {
-                            matched_function = Some((matched_name.clone(), func));
+                        if full_name.to_lowercase().starts_with(matched_name) {
+                            matched_function = Some((matched_name.to_string(), func));
                             // Calculate where the matched name ends
                             let matched_len_bytes = matched_name.len();
                             used_name_end = name_start_idx + matched_len_bytes;
@@ -882,10 +837,7 @@ impl<'a> ForgeScriptParser<'a> {
                                 Err(_) => {
                                     if !ignore_next_line {
                                         diagnostics.push(Diagnostic {
-                                            message: format!(
-                                                "Failed to parse args for `${}`",
-                                                name
-                                            ),
+                                            message: format!("Failed to parse args for `${name}`",),
                                             start,
                                             end: last_idx,
                                         });
@@ -909,7 +861,7 @@ impl<'a> ForgeScriptParser<'a> {
 
                     tokens.push(Token {
                         kind: TokenKind::FunctionName,
-                        text: Box::leak(self.code[start..token_end].to_string().into_boxed_str()),
+                        text: self.code[start..token_end].to_string(),
                         start,
                         end: token_end,
                     });
@@ -917,11 +869,7 @@ impl<'a> ForgeScriptParser<'a> {
                     if has_suffix {
                         tokens.push(Token {
                             kind: TokenKind::Text,
-                            text: Box::leak(
-                                self.code[token_end..full_name_end]
-                                    .to_string()
-                                    .into_boxed_str(),
-                            ),
+                            text: self.code[token_end..full_name_end].to_string(),
                             start: token_end,
                             end: full_name_end,
                         });
@@ -950,9 +898,7 @@ impl<'a> ForgeScriptParser<'a> {
                     }
                     tokens.push(Token {
                         kind: TokenKind::Unknown,
-                        text: Box::leak(
-                            self.code[start..full_name_end].to_string().into_boxed_str(),
-                        ),
+                        text: self.code[start..full_name_end].to_string(),
                         start,
                         end: full_name_end,
                     });
@@ -970,7 +916,7 @@ impl<'a> ForgeScriptParser<'a> {
                             // Emit '[' token
                             tokens.push(Token {
                                 kind: TokenKind::Text,
-                                text: Box::leak(self.code[i..i + 1].to_string().into_boxed_str()),
+                                text: self.code[i..i + 1].to_string(),
                                 start: i,
                                 end: i + 1,
                             });
@@ -1008,9 +954,7 @@ impl<'a> ForgeScriptParser<'a> {
                             // Emit ']' token
                             tokens.push(Token {
                                 kind: TokenKind::Text,
-                                text: Box::leak(
-                                    self.code[end_idx..end_idx + 1].to_string().into_boxed_str(),
-                                ),
+                                text: self.code[end_idx..end_idx + 1].to_string(),
                                 start: end_idx,
                                 end: end_idx + 1,
                             });
@@ -1039,7 +983,7 @@ impl<'a> ForgeScriptParser<'a> {
                             // Consume the '[' as text
                             tokens.push(Token {
                                 kind: TokenKind::Text,
-                                text: Box::leak(self.code[i..i + 1].to_string().into_boxed_str()),
+                                text: self.code[i..i + 1].to_string(),
                                 start: i,
                                 end: i + 1,
                             });
@@ -1055,7 +999,7 @@ impl<'a> ForgeScriptParser<'a> {
         if last_idx < self.code.len() {
             tokens.push(Token {
                 kind: TokenKind::Text,
-                text: Box::leak(self.code[last_idx..].to_string().into_boxed_str()),
+                text: self.code[last_idx..].to_string(),
                 start: last_idx,
                 end: self.code.len(),
             });
@@ -1264,7 +1208,7 @@ fn parse_nested_args(
                     )?);
                 } else {
                     args.push(smallvec![ParsedArg::Literal {
-                        text: Cow::Owned(String::new())
+                        text: String::new()
                     }]);
                 }
                 current.clear();
@@ -1305,7 +1249,7 @@ fn parse_nested_args(
             )?);
         } else {
             args.push(smallvec![ParsedArg::Literal {
-                text: Cow::Owned(String::new())
+                text: String::new()
             }]);
         }
     }
@@ -1338,12 +1282,12 @@ fn parse_single_arg(
             }])
         } else {
             Ok(smallvec![ParsedArg::Literal {
-                text: Cow::Owned(input.to_string())
+                text: input.to_string()
             }])
         }
     } else {
         Ok(smallvec![ParsedArg::Literal {
-            text: Cow::Owned(input.to_string())
+            text: input.to_string()
         }])
     }
 }

@@ -10,7 +10,7 @@ use tower_lsp::lsp_types::*;
 use crate::server::ForgeScriptServer;
 use crate::utils::spawn_log;
 
-/// Check if a character at the given byte index is escaped by a backslash.
+/// Checks if a character at the given byte index is escaped by a backslash.
 ///
 /// Counts consecutive backslashes before the character:
 /// - Odd number of backslashes → character is escaped
@@ -37,8 +37,9 @@ fn is_escaped(text: &str, byte_idx: usize) -> bool {
     backslash_count % 2 == 1
 }
 
-/// Convert LSP Position (line, character) to byte offset.
-/// Handles UTF-16 character counts correctly.
+/// Converts an LSP Position (line, character) to a byte offset within the text.
+///
+/// Handles UTF-16 character counts correctly as required by the LSP specification.
 fn position_to_offset(text: &str, position: Position) -> Option<usize> {
     let mut current_offset = 0;
 
@@ -62,7 +63,12 @@ fn position_to_offset(text: &str, position: Position) -> Option<usize> {
     None
 }
 
-/// Handles hover requests for ForgeScript
+/// Handles LSP hover requests by identifying the ForgeScript function under the cursor.
+///
+/// Provides a markdown tooltip with:
+/// - Function signature with parameter details
+/// - Description from metadata
+/// - Usage examples
 pub async fn handle_hover(
     server: &ForgeScriptServer,
     params: HoverParams,
@@ -76,9 +82,11 @@ pub async fn handle_hover(
         .clone();
     let position = params.text_document_position_params.position;
 
-    // Fetch document text safely
     let text: String = {
-        let docs = server.documents.read().unwrap();
+        let docs = server
+            .documents
+            .read()
+            .expect("Hover: documents lock poisoned");
         match docs.get(&uri) {
             Some(t) => t.clone(),
             _ => {
@@ -231,13 +239,13 @@ pub async fn handle_hover(
             // Check if we have a valid function name after modifiers
             let after_modifiers = &clean_token[modifier_end_idx..];
             if !after_modifiers.is_empty() {
-                clean_token = format!("${}", after_modifiers);
+                clean_token = format!("${after_modifiers}");
             }
         }
     }
 
     // Acquire a read lock on the manager
-    let mgr = server.manager.read().unwrap();
+    let mgr = server.manager.read().expect("Hover: manager lock poisoned");
     let mgr_inner = mgr.clone();
 
     // Try to find the function using the cleaned token
@@ -276,13 +284,13 @@ pub async fn handle_hover(
             .unwrap_or_else(|| "void".to_string());
 
         md.push_str("```forgescript\n");
-        if func_brackets == &Some(true) {
-            md.push_str(&format!("{}[{}] -> {}\n", func_name, args_str, outputs_str));
-        } else if func_brackets == &Some(false) {
-            md.push_str(&format!("{}[{}] -> {}\n", func_name, args_str, outputs_str));
+        if let Some(true) = func_brackets {
+            md.push_str(&format!("{func_name}[{args_str}] -> {outputs_str}\n"));
+        } else if let Some(false) = func_brackets {
+            md.push_str(&format!("{func_name}[{args_str}] -> {outputs_str}\n"));
             md.push_str("Note: brackets are optional.\n");
         } else {
-            md.push_str(&format!("{} -> {}\n", func_name, outputs_str));
+            md.push_str(&format!("{func_name} -> {outputs_str}\n"));
         }
         md.push_str("```\n");
 
@@ -305,7 +313,10 @@ pub async fn handle_hover(
         spawn_log(
             server.client.clone(),
             MessageType::LOG,
-            format!("[PERF] hover: {} in {:?}", func_name, start.elapsed()),
+            format!(
+                "[PERF] hover: {func_name} in {elapsed:?}",
+                elapsed = start.elapsed()
+            ),
         );
 
         return Ok(Some(Hover {

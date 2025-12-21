@@ -7,12 +7,10 @@
 //!
 //! Supports loading from multiple URLs, GitHub shorthand syntax, and custom user-defined functions.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::{Arc, RwLock},
-};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -28,25 +26,40 @@ use crate::utils::Event;
 // 📦 Data Model
 // ==============================
 
-
-
+/// Represents a ForgeScript function call with its metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Function {
+    /// The name of the function, including the `$` prefix.
     pub name: String,
+    /// Version information for the function.
     pub version: JsonValue,
+    /// Detailed description of the function's behavior.
     pub description: String,
+    /// Whether the function requires brackets `[...]`.
     pub brackets: Option<bool>,
+    /// Whether the function unwraps its arguments.
     pub unwrap: bool,
+    /// List of arguments the function accepts.
     pub args: Option<Vec<Arg>>,
+    /// Expected output types or values.
     pub output: Option<Vec<String>>,
+    /// Category the function belongs to.
     pub category: String,
+    /// List of aliases for this function.
     pub aliases: Option<Vec<String>>,
+    /// Whether the function is experimental.
     pub experimental: Option<bool>,
+    /// Example usage of the function.
     pub examples: Option<Vec<String>>,
+    /// Whether the function is deprecated.
     pub deprecated: Option<bool>,
 }
 
 impl Function {
+    /// Generates a signature label for the function, used in signature help and documentation.
+    ///
+    /// # Returns
+    /// A string representation of the function signature, e.g., `$ping[message;?ephemeral]`.
     pub fn signature_label(&self) -> String {
         let args = self.args.as_deref().unwrap_or(&[]);
         let params = args
@@ -82,24 +95,35 @@ impl Function {
             .collect::<Vec<_>>()
             .join("; ");
 
-        format!("{}[{}]", self.name, params)
+        format!("{name}[{params}]", name = self.name, params = params)
     }
 }
 
+/// Represents an argument for a ForgeScript function.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Arg {
+    /// The name of the argument.
     pub name: String,
+    /// Description of the argument's purpose.
     pub description: String,
+    /// Whether this is a rest argument (variadic).
     pub rest: bool,
+    /// Whether the argument is required.
     pub required: Option<bool>,
+    /// The type of the argument.
     #[serde(rename = "type")]
     pub arg_type: JsonValue,
+    /// Condition for the argument (if any).
     pub condition: Option<bool>,
+    /// List of allowed enum values for this argument.
     #[serde(rename = "enum")]
     pub arg_enum: Option<Vec<String>>,
+    /// The name of the enum type.
     pub enum_name: Option<String>,
+    /// Pointer for complex argument types.
     pub pointer: Option<i64>,
+    /// Property name for pointer types.
     pub pointer_property: Option<String>,
 }
 
@@ -107,6 +131,7 @@ pub struct Arg {
 // 🌐 Fetcher + File Cache
 // ==============================
 
+/// HTTP client with file-based caching for metadata sources.
 #[derive(Clone, Debug)]
 pub struct Fetcher {
     http: Client,
@@ -114,22 +139,36 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
+    /// Creates a new Fetcher with the specified cache directory.
+    ///
+    /// # Arguments
+    /// * `cache_dir` - Path to the directory where cached responses will be stored.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         let dir = cache_dir.into();
         if !dir.exists() {
-            fs::create_dir_all(&dir).unwrap();
+            fs::create_dir_all(&dir).expect("Failed to create cache directory");
         }
         Self {
-            http: Client::builder().build().unwrap(),
+            http: Client::builder()
+                .build()
+                .expect("Failed to build HTTP client"),
             cache_dir: dir,
         }
     }
 
+    /// Returns the cache path for a given URL.
     fn cache_path(&self, url: &str) -> PathBuf {
         let safe = URL_SAFE_NO_PAD.encode(url);
         self.cache_dir.join(format!("{safe}.json"))
     }
 
+    /// Fetches data from a URL or returns cached data if available.
+    ///
+    /// # Arguments
+    /// * `url` - The URL to fetch data from.
+    ///
+    /// # Returns
+    /// The deserialized data of type `T`.
     pub async fn fetch_or_cache<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         let path = self.cache_path(url);
 
@@ -152,6 +191,13 @@ impl Fetcher {
         }
     }
 
+    /// Fetches function metadata from multiple URLs concurrently.
+    ///
+    /// # Arguments
+    /// * `urls` - List of URLs to fetch functions from.
+    ///
+    /// # Returns
+    /// A vector of all successfully fetched functions.
     pub async fn fetch_all(&self, urls: &[String]) -> Result<Vec<Function>> {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
@@ -177,6 +223,13 @@ impl Fetcher {
         Ok(out)
     }
 
+    /// Fetches enum definitions from multiple URLs concurrently.
+    ///
+    /// # Arguments
+    /// * `urls` - List of URLs to fetch enums from.
+    ///
+    /// # Returns
+    /// A map of enum names to their allowed values.
     pub async fn fetch_all_enums(&self, urls: &[String]) -> Result<HashMap<String, Vec<String>>> {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
@@ -195,6 +248,13 @@ impl Fetcher {
         Ok(out)
     }
 
+    /// Fetches event definitions from multiple URLs concurrently.
+    ///
+    /// # Arguments
+    /// * `urls` - List of URLs to fetch events from.
+    ///
+    /// # Returns
+    /// A vector of all successfully fetched events.
     pub async fn fetch_all_events(&self, urls: &[String]) -> Result<Vec<Event>> {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
@@ -215,12 +275,18 @@ impl Fetcher {
 // ⚡ Trie Implementation
 // ==============================
 
+/// A node in the [FunctionTrie].
 #[derive(Default, Debug)]
 struct TrieNode {
+    /// Child nodes indexed by character.
     children: HashMap<char, TrieNode>,
+    /// The function metadata stored at this node, if any.
     value: Option<Arc<Function>>,
 }
 
+/// A prefix tree (Trie) for efficient function name lookup.
+///
+/// Supports O(k) lookup time where k is the length of the function name.
 #[derive(Default, Debug)]
 pub struct FunctionTrie {
     root: TrieNode,
@@ -249,7 +315,9 @@ impl TrieNode {
         }
 
         let c = chars[index];
-        if let Some(child) = self.children.get_mut(&c) && child.remove_recursive(chars, index + 1, size) {
+        if let Some(child) = self.children.get_mut(&c)
+            && child.remove_recursive(chars, index + 1, size)
+        {
             self.children.remove(&c);
             return self.value.is_none() && self.children.is_empty();
         }
@@ -258,6 +326,11 @@ impl TrieNode {
 }
 
 impl FunctionTrie {
+    /// Inserts a function into the trie.
+    ///
+    /// # Arguments
+    /// * `key` - The function name (case-insensitive).
+    /// * `func` - The function metadata.
     pub fn insert(&mut self, key: &str, func: Arc<Function>) {
         let mut node = &mut self.root;
         for c in key.to_lowercase().chars() {
@@ -269,15 +342,30 @@ impl FunctionTrie {
         node.value = Some(func);
     }
 
+    /// Removes a function from the trie.
+    ///
+    /// # Arguments
+    /// * `key` - The function name to remove.
     pub fn remove(&mut self, key: &str) {
         let chars: Vec<char> = key.to_lowercase().chars().collect();
         self.root.remove_recursive(&chars, 0, &mut self.size);
     }
+    /// Collects all functions stored in the trie.
+    ///
+    /// # Returns
+    /// A vector of all function metadata.
     pub fn collect_all(&self) -> Vec<Arc<Function>> {
         let mut out = Vec::new();
         self.root.collect_all(&mut out);
         out
     }
+    /// Finds the longest prefix match for a given string.
+    ///
+    /// # Arguments
+    /// * `text` - The text to search in.
+    ///
+    /// # Returns
+    /// A tuple containing the matched string and the function metadata, if found.
     pub fn get(&self, text: &str) -> Option<(String, Arc<Function>)> {
         let chars: Vec<char> = text.to_lowercase().chars().collect();
         let mut best_match: Option<(String, Arc<Function>)> = None;
@@ -324,17 +412,31 @@ impl FunctionTrie {
 // 🧠 MetadataManager
 // ==============================
 
+/// Manages ForgeScript function metadata, enums, and events.
+///
+/// Orchestrates loading from remote sources, local configuration, and custom JS/TS files.
 #[derive(Debug)]
 pub struct MetadataManager {
+    /// Helper for fetching and caching remote data.
     fetcher: Fetcher,
+    /// List of source URLs for function metadata.
     fetch_urls: Vec<String>,
+    /// Trie for efficient function lookup.
     trie: Arc<RwLock<FunctionTrie>>,
+    /// Map of enum names to allowed values.
     pub enums: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// List of events supported by ForgeScript.
     pub events: Arc<RwLock<Vec<Event>>>,
+    /// Map of files to the function names they register.
     pub file_map: Arc<RwLock<HashMap<PathBuf, Vec<String>>>>,
 }
 
 impl MetadataManager {
+    /// Creates a new MetadataManager.
+    ///
+    /// # Arguments
+    /// * `cache_dir` - Path for caching fetched metadata.
+    /// * `fetch_urls` - Initial list of metadata source URLs.
     pub async fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
         let fetcher = Fetcher::new(cache_dir);
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
@@ -352,11 +454,15 @@ impl MetadataManager {
         })
     }
 
+    /// Loads all metadata from the configured URLs.
     pub async fn load_all(&self) -> Result<()> {
         let all_funcs = self.fetcher.fetch_all(&self.fetch_urls).await?;
 
         {
-            let mut trie = self.trie.write().unwrap();
+            let mut trie = self
+                .trie
+                .write()
+                .expect("MetadataManager: trie lock poisoned");
             for func in all_funcs {
                 if let Some(aliases) = &func.aliases {
                     for alias in aliases {
@@ -384,15 +490,31 @@ impl MetadataManager {
         }
 
         let all_enums = self.fetcher.fetch_all_enums(&enum_urls).await?;
-        *self.enums.write().unwrap() = all_enums;
+        *self
+            .enums
+            .write()
+            .expect("MetadataManager: enums lock poisoned") = all_enums;
 
         let all_events = self.fetcher.fetch_all_events(&event_urls).await?;
-        *self.events.write().unwrap() = all_events;
+        *self
+            .events
+            .write()
+            .expect("MetadataManager: events lock poisoned") = all_events;
 
         Ok(())
     }
 
-    pub fn load_custom_functions_from_folder(&self, path: PathBuf) -> Result<(Vec<PathBuf>, usize)> {
+    /// Loads custom functions from all `.js` and `.ts` files in a folder and its subfolders.
+    ///
+    /// # Arguments
+    /// * `path` - The root directory to scan.
+    ///
+    /// # Returns
+    /// A tuple of (list of scanned files, total count of registered functions).
+    pub fn load_custom_functions_from_folder(
+        &self,
+        path: PathBuf,
+    ) -> Result<(Vec<PathBuf>, usize)> {
         if !path.exists() || !path.is_dir() {
             return Ok((Vec::new(), 0));
         }
@@ -405,18 +527,30 @@ impl MetadataManager {
         Ok((files_found, custom_funcs.len()))
     }
 
-    fn scan_recursive(&self, path: &Path, funcs: &mut Vec<crate::utils::CustomFunction>, files: &mut Vec<PathBuf>) -> Result<()> {
+    /// Recursively scans a directory for `.js` and `.ts` files.
+    fn scan_recursive(
+        &self,
+        path: &Path,
+        funcs: &mut Vec<crate::utils::CustomFunction>,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<()> {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
                 self.scan_recursive(&path, funcs, files)?;
-            } else if path.is_file() && let Some(_ext) = path.extension().filter(|&e| e == "js" || e == "ts") {
+            } else if path.is_file()
+                && let Some(_ext) = path.extension().filter(|&e| e == "js" || e == "ts")
+            {
                 let content = fs::read_to_string(&path)?;
-                let parsed = self.parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
-                
+                let parsed = self
+                    .parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
+
                 let names = self.add_custom_functions(parsed.clone())?;
-                self.file_map.write().unwrap().insert(path.clone(), names);
+                self.file_map
+                    .write()
+                    .expect("MetadataManager: file_map lock poisoned")
+                    .insert(path.clone(), names);
 
                 funcs.extend(parsed);
                 files.push(path);
@@ -425,16 +559,24 @@ impl MetadataManager {
         Ok(())
     }
 
+    /// Removes all functions registered from a specific file path.
     pub fn remove_functions_at_path(&self, path: &Path) {
-        let mut file_map = self.file_map.write().unwrap();
+        let mut file_map = self
+            .file_map
+            .write()
+            .expect("MetadataManager: file_map lock poisoned");
         if let Some(names) = file_map.remove(path) {
-            let mut trie = self.trie.write().unwrap();
+            let mut trie = self
+                .trie
+                .write()
+                .expect("MetadataManager: trie lock poisoned");
             for name in names {
                 trie.remove(&name);
             }
         }
     }
 
+    /// Reloads custom functions from a single file.
     pub fn reload_file(&self, path: PathBuf) -> Result<usize> {
         if !path.exists() || !path.is_file() {
             self.remove_functions_at_path(&path);
@@ -442,30 +584,44 @@ impl MetadataManager {
         }
 
         let content = fs::read_to_string(&path)?;
-        let parsed = self.parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
-        
+        let parsed =
+            self.parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
+
         // Remove old entries first
         self.remove_functions_at_path(&path);
-        
+
         let count = parsed.len();
         let names = self.add_custom_functions(parsed)?;
-        self.file_map.write().unwrap().insert(path, names);
-        
+        self.file_map
+            .write()
+            .expect("MetadataManager: file_map lock poisoned")
+            .insert(path, names);
+
         Ok(count)
     }
 
-    fn parse_custom_functions_from_js(&self, content: &str, file_path: &str) -> Vec<crate::utils::CustomFunction> {
+    /// Internal regex-based parser for extracting custom functions from JS/TS code.
+    fn parse_custom_functions_from_js(
+        &self,
+        content: &str,
+        file_path: &str,
+    ) -> Vec<crate::utils::CustomFunction> {
         let mut functions = Vec::new();
 
         // 1. Find all "name:" positions
-        let name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#).unwrap();
-        let name_matches: Vec<_> = name_re.captures_iter(content).map(|c| {
-            let m = c.get(0).unwrap();
-            (m.start(), m.end(), c[1].to_string())
-        }).collect();
+        let name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#)
+            .expect("MetadataManager: regex compile failed");
+        let name_matches: Vec<_> = name_re
+            .captures_iter(content)
+            .map(|c| {
+                let m = c.get(0).unwrap();
+                (m.start(), m.end(), c[1].to_string())
+            })
+            .collect();
 
         // 2. Find all "params: [" positions and their matching "]"
-        let params_start_re = regex::Regex::new(r#"params:\s*\["#).unwrap();
+        let params_start_re =
+            regex::Regex::new(r#"params:\s*\["#).expect("MetadataManager: regex compile failed");
         let mut params_ranges = Vec::new();
         for m in params_start_re.find_iter(content) {
             let start = m.start();
@@ -496,24 +652,40 @@ impl MetadataManager {
             }
         }
 
-        let desc_double_re = regex::Regex::new(r#"(?s)description:\s*"((?:[^"\\]|\\.)*?)""#).unwrap();
-        let desc_single_re = regex::Regex::new(r#"(?s)description:\s*'((?:[^'\\]|\\.)*?)'"#).unwrap();
-        let desc_backtick_re = regex::Regex::new(r#"(?s)description:\s*`((?:[^`\\]|\\.)*?)`"#).unwrap();
-        let brackets_re = regex::Regex::new(r#"brackets:\s*(true|false)"#).unwrap();
-        let params_re = regex::Regex::new(r#"(?s)params:\s*\[(.*?)\]"#).unwrap();
-        let p_name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#).unwrap();
+        let desc_double_re = regex::Regex::new(r#"(?s)description:\s*"((?:[^"\\]|\\.)*?)""#)
+            .expect("MetadataManager: regex compile failed");
+        let desc_single_re = regex::Regex::new(r#"(?s)description:\s*'((?:[^'\\]|\\.)*?)'"#)
+            .expect("MetadataManager: regex compile failed");
+        let desc_backtick_re = regex::Regex::new(r#"(?s)description:\s*`((?:[^`\\]|\\.)*?)`"#)
+            .expect("MetadataManager: regex compile failed");
+        let brackets_re = regex::Regex::new(r#"brackets:\s*(true|false)"#)
+            .expect("MetadataManager: regex compile failed");
+        let params_re = regex::Regex::new(r#"(?s)params:\s*\[(.*?)\]"#)
+            .expect("MetadataManager: regex compile failed");
+        let p_name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#)
+            .expect("MetadataManager: regex compile failed");
+
+        let obj_re =
+            regex::Regex::new(r#"(?s)\{(.*?)\}"#).expect("MetadataManager: regex compile failed");
+        let required_re = regex::Regex::new(r#"required:\s*(true|false)"#)
+            .expect("MetadataManager: regex compile failed");
+        let rest_re = regex::Regex::new(r#"rest:\s*(true|false)"#)
+            .expect("MetadataManager: regex compile failed");
+        let type_re = regex::Regex::new(r#"type:\s*([^,}\n\s]+)"#)
+            .expect("MetadataManager: regex compile failed");
 
         for i in 0..filtered_names.len() {
             let (_start, end_pos, name) = &filtered_names[i];
             let chunk_end = if i + 1 < filtered_names.len() {
-                filtered_names[i+1].0
+                filtered_names[i + 1].0
             } else {
                 content.len()
             };
             let chunk = &content[*end_pos..chunk_end];
 
             // Extract metadata from chunk
-            let description = desc_double_re.captures(chunk)
+            let description = desc_double_re
+                .captures(chunk)
                 .or_else(|| desc_single_re.captures(chunk))
                 .or_else(|| desc_backtick_re.captures(chunk))
                 .map(|c| c[1].to_string());
@@ -523,59 +695,70 @@ impl MetadataManager {
             let mut params = None;
             if let Some(p_cap) = params_re.captures(chunk) {
                 let p_content = &p_cap[1];
-                
+
                 // Try to parse individual objects in the array first
                 let mut param_objects = Vec::new();
-                let obj_re = regex::Regex::new(r#"(?s)\{(.*?)\}"#).unwrap();
-                
+
                 for obj_cap in obj_re.captures_iter(p_content) {
                     let obj_body = &obj_cap[1];
                     let mut obj_map = serde_json::Map::new();
-                    
+
                     // Extract name (required for a valid param object)
                     if let Some(n_cap) = p_name_re.captures(obj_body) {
                         obj_map.insert("name".to_string(), JsonValue::String(n_cap[1].to_string()));
-                        
+
                         // Extract required
-                        let required_re = regex::Regex::new(r#"required:\s*(true|false)"#).unwrap();
                         if let Some(r_cap) = required_re.captures(obj_body) {
-                            obj_map.insert("required".to_string(), JsonValue::Bool(&r_cap[1] == "true"));
+                            obj_map.insert(
+                                "required".to_string(),
+                                JsonValue::Bool(&r_cap[1] == "true"),
+                            );
                         }
-                        
+
                         // Extract rest
-                        let rest_re = regex::Regex::new(r#"rest:\s*(true|false)"#).unwrap();
                         if let Some(rest_cap) = rest_re.captures(obj_body) {
-                            obj_map.insert("rest".to_string(), JsonValue::Bool(&rest_cap[1] == "true"));
+                            obj_map.insert(
+                                "rest".to_string(),
+                                JsonValue::Bool(&rest_cap[1] == "true"),
+                            );
                         }
-                        
+
                         // Extract type
-                        let type_re = regex::Regex::new(r#"type:\s*([^,}\n\s]+)"#).unwrap();
                         if let Some(t_cap) = type_re.captures(obj_body) {
                             let t_val = t_cap[1].trim();
-                            let t_val_clean = t_val.trim_matches(|c| c == '\'' || c == '\"').to_string();
-                            let t_final = if t_val_clean.starts_with("ArgType.") {
-                                t_val_clean["ArgType.".len()..].to_string()
-                            } else {
-                                t_val_clean
-                            };
+                            let t_val_clean =
+                                t_val.trim_matches(|c| c == '\'' || c == '\"').to_string();
+                            let t_final =
+                                if let Some(stripped) = t_val_clean.strip_prefix("ArgType.") {
+                                    stripped.to_string()
+                                } else {
+                                    t_val_clean
+                                };
                             obj_map.insert("type".to_string(), JsonValue::String(t_final));
                         } else {
                             // Default type if missing
-                            obj_map.insert("type".to_string(), JsonValue::String("String".to_string()));
+                            obj_map.insert(
+                                "type".to_string(),
+                                JsonValue::String("String".to_string()),
+                            );
                         }
-                        
+
                         // Extract description
-                        if let Some(d_cap) = desc_double_re.captures(obj_body)
+                        if let Some(d_cap) = desc_double_re
+                            .captures(obj_body)
                             .or_else(|| desc_single_re.captures(obj_body))
                             .or_else(|| desc_backtick_re.captures(obj_body))
                         {
-                            obj_map.insert("description".to_string(), JsonValue::String(d_cap[1].to_string()));
+                            obj_map.insert(
+                                "description".to_string(),
+                                JsonValue::String(d_cap[1].to_string()),
+                            );
                         }
-                        
+
                         param_objects.push(JsonValue::Object(obj_map));
                     }
                 }
-                
+
                 if !param_objects.is_empty() {
                     params = Some(JsonValue::Array(param_objects));
                 } else {
@@ -585,7 +768,9 @@ impl MetadataManager {
                         names.push(p_cap[1].to_string());
                     }
                     if !names.is_empty() {
-                        params = Some(JsonValue::Array(names.into_iter().map(JsonValue::String).collect()));
+                        params = Some(JsonValue::Array(
+                            names.into_iter().map(JsonValue::String).collect(),
+                        ));
                     }
                 }
             }
@@ -603,11 +788,21 @@ impl MetadataManager {
         functions
     }
 
+    /// Adds custom user-defined functions to the manager.
+    ///
+    /// # Arguments
+    /// * `custom_funcs` - List of custom functions to register.
+    ///
+    /// # Returns
+    /// A list of registered function names (including `$`).
     pub fn add_custom_functions(
         &self,
         custom_funcs: Vec<crate::utils::CustomFunction>,
     ) -> Result<Vec<String>> {
-        let mut trie = self.trie.write().unwrap();
+        let mut trie = self
+            .trie
+            .write()
+            .expect("MetadataManager: trie lock poisoned");
         let mut registered_names = Vec::new();
 
         for custom in custom_funcs {
@@ -615,7 +810,7 @@ impl MetadataManager {
             let name = if custom.name.starts_with('$') {
                 custom.name.clone()
             } else {
-                format!("${}", custom.name)
+                format!("${name}", name = custom.name)
             };
 
             // Convert custom function params to standard Arg format
@@ -675,9 +870,6 @@ impl MetadataManager {
             };
 
             // Determine brackets value
-            // - If explicitly set, use that value
-            // - If params given but brackets not set, default to true (required)
-            // - If no params and brackets not set, leave as None (undefined)
             let brackets = if let Some(b) = custom.brackets {
                 Some(b)
             } else if custom.params.is_some() {
@@ -693,7 +885,7 @@ impl MetadataManager {
                         if a.starts_with('$') {
                             a.clone()
                         } else {
-                            format!("${}", a)
+                            format!("${a}", a = a)
                         }
                     })
                     .collect::<Vec<_>>()
@@ -721,7 +913,7 @@ impl MetadataManager {
             trie.insert(&name, arc_func);
             registered_names.push(name.clone());
 
-            // Insert aliases (like load_all does)
+            // Insert aliases
             if let Some(aliases) = &func.aliases {
                 for alias in aliases {
                     let mut alias_func = func.clone();
@@ -736,27 +928,44 @@ impl MetadataManager {
         Ok(registered_names)
     }
 
-    pub fn get(&self, name: &str) -> Option<Arc<Function>> {
-        let trie = self.trie.read().unwrap();
-        trie.get(name).map(|(_, func)| func)
-    }
-
-    pub fn get_exact(&self, name: &str) -> Option<Arc<Function>> {
-        let trie = self.trie.read().unwrap();
-        trie.get_exact(name)
-    }
-
+    /// Finds a function by its name using prefix matching.
     pub fn get_with_match(&self, name: &str) -> Option<(String, Arc<Function>)> {
-        let trie = self.trie.read().unwrap();
+        let trie = self
+            .trie
+            .read()
+            .expect("MetadataManager: trie lock poisoned");
         trie.get(name)
     }
 
+    /// Finds a function by its name (shorthand for get_with_match).
+    pub fn get(&self, name: &str) -> Option<Arc<Function>> {
+        self.get_with_match(name).map(|(_, func)| func)
+    }
+
+    /// Finds a function by its exact name (no prefix matching).
+    pub fn get_exact(&self, name: &str) -> Option<Arc<Function>> {
+        let trie = self
+            .trie
+            .read()
+            .expect("MetadataManager: trie lock poisoned");
+        trie.get_exact(name)
+    }
+
+    /// Returns the number of functions stored in the manager.
     pub fn function_count(&self) -> usize {
-        let trie = self.trie.read().unwrap();
+        let trie = self
+            .trie
+            .read()
+            .expect("MetadataManager: trie lock poisoned");
         trie.len()
     }
+
+    /// Returns a list of all functions stored in the manager.
     pub fn all_functions(&self) -> Vec<Arc<Function>> {
-        let trie = self.trie.read().unwrap();
+        let trie = self
+            .trie
+            .read()
+            .expect("MetadataManager: trie lock poisoned");
         trie.collect_all()
     }
 }

@@ -18,14 +18,17 @@ mod semantic;
 mod server;
 mod utils;
 
-use metadata::MetadataManager;
-use server::ForgeScriptServer;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
 use tokio::io::{stdin, stdout};
 use tower_lsp::{LspService, Server};
-use utils::{load_forge_config, load_forge_config_full};
 
+use crate::metadata::MetadataManager;
+use crate::server::ForgeScriptServer;
+use crate::utils::{load_forge_config, load_forge_config_full};
+
+/// Main entry point for the ForgeLSP server.
 #[tokio::main]
 async fn main() {
     // Initialize workspace folders (will be updated during LSP initialize if client provides them)
@@ -44,14 +47,14 @@ async fn main() {
     let manager = Arc::new(
         MetadataManager::new("./.cache", fetch_urls)
             .await
-            .expect("Failed to initialize metadata manager"),
+            .expect("Failed to initialize metadata manager: check cache directory permissions"),
     );
 
     // Load all function metadata from configured sources
     manager
         .load_all()
         .await
-        .expect("Failed to load metadata sources");
+        .expect("Failed to load metadata sources: check internet connection or URL validity");
 
     // Load custom functions from forgeconfig.json if available
     if let Some(config) = load_forge_config_full(&workspace_folders)

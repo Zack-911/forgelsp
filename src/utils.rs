@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tower_lsp::Client;
-use tower_lsp::lsp_types::MessageType;
+use tower_lsp::lsp_types::*;
 
 /// Spawns an asynchronous task to log a message to the LSP client.
 ///
@@ -132,7 +132,9 @@ fn resolve_github_shorthand(input: String) -> String {
     }
 
     // Remove the "github:" prefix
-    let trimmed = &input["github:".len()..];
+    let Some(trimmed) = input.strip_prefix("github:") else {
+        return input;
+    };
 
     // Split branch if provided (default to "main" if not specified)
     let (path, branch) = match trimmed.split_once('#') {
