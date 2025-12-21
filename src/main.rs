@@ -68,6 +68,8 @@ async fn main() {
     // Wrap manager in RwLock to allow dynamic updates during LSP operation
     // (e.g., when workspace configuration changes)
     let manager_wrapped = Arc::new(RwLock::new(manager));
+    let full_config = load_forge_config_full(&workspace_folders);
+    let config_wrapped = Arc::new(RwLock::new(full_config.clone()));
 
     // Initialize LSP service with all required state
     let (service, socket) = LspService::new(|client| ForgeScriptServer {
@@ -77,6 +79,7 @@ async fn main() {
         parsed_cache: Arc::new(RwLock::new(HashMap::new())), // Parse result cache
         workspace_folders: Arc::new(RwLock::new(workspace_folders.clone())), // Active workspaces
         multiple_function_colors: Arc::new(RwLock::new(true)), // Semantic highlighting config
+        config: config_wrapped
     });
 
     // Start the LSP server on stdin/stdout

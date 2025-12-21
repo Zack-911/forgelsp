@@ -20,7 +20,7 @@ use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
-use crate::utils::{load_forge_config_full, spawn_log};
+use crate::utils::{ForgeConfig, load_forge_config_full, spawn_log};
 use regex::Regex;
 use tower_lsp::Client;
 use tower_lsp::LanguageServer;
@@ -47,6 +47,7 @@ pub struct ForgeScriptServer {
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>,
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
     pub multiple_function_colors: Arc<RwLock<bool>>,
+    pub config: Arc<RwLock<Option<ForgeConfig>>>,
 }
 
 impl ForgeScriptServer {
@@ -684,41 +685,73 @@ impl LanguageServer for ForgeScriptServer {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        let manager_outer = self
-            .manager
-            .read()
-            .expect("Server: manager lock poisoned")
-            .clone();
-        let manager = manager_outer.as_ref();
-        for change in params.changes {
-            if let Ok(path) = change.uri.to_file_path() {
-                match change.typ {
-                    FileChangeType::CREATED | FileChangeType::CHANGED => {
-                        if let Ok(count) = manager.reload_file(path.clone()) {
-                            spawn_log(
-                                self.client.clone(),
-                                MessageType::INFO,
-                                format!(
-                                    "[INFO] Reloaded custom functions from {}: {count} functions registered",
-                                    path.display()
-                                ),
-                            );
-                        }
+    let manager_outer = self.manager.read().expect("Server: manager lock poisoned").clone();
+    let manager = manager_outer.as_ref();
+
+    let config_guard = self.config.read().expect("Server: config lock poisoned");
+    let workspace_folders = self.workspace_folders.read().expect("Server: workspace lock poisoned");
+
+    // Get the raw string from config (e.g., "custom_logic")
+    let relative_custom_path = config_guard
+        .as_ref()
+        .and_then(|c| c.custom_functions_path.as_ref());
+
+    for change in params.changes {
+        if let Ok(path) = change.uri.to_file_path() {
+            
+            // Validate if the file is in the custom folder
+            let mut is_in_custom_folder = false;
+            
+            if let Some(rel_path) = relative_custom_path {
+                for root in workspace_folders.iter() {
+                    // Combine workspace root + relative config path
+                    let full_allowed_dir = root.join(rel_path);
+                    
+                    // Use starts_with on the absolute paths
+                    if path.starts_with(&full_allowed_dir) {
+                        is_in_custom_folder = true;
+                        break;
                     }
-                    FileChangeType::DELETED => {
-                        manager.remove_functions_at_path(&path);
+                }
+            }
+
+            if !is_in_custom_folder {
+                continue;
+            }
+
+            // Only process .js or .ts files
+            let extension = path.extension().and_then(|s| s.to_str());
+            if !matches!(extension, Some("js") | Some("ts")) {
+                continue;
+            }
+
+            match change.typ {
+                FileChangeType::CREATED | FileChangeType::CHANGED => {
+                    if let Ok(count) = manager.reload_file(path.clone()) {
                         spawn_log(
                             self.client.clone(),
                             MessageType::INFO,
                             format!(
-                                "[INFO] Removed custom functions from deleted file: {}",
+                                "[INFO] Reloaded custom functions from {}: {count} functions registered",
                                 path.display()
                             ),
                         );
                     }
-                    _ => {}
                 }
+                FileChangeType::DELETED => {
+                    manager.remove_functions_at_path(&path);
+                    spawn_log(
+                        self.client.clone(),
+                        MessageType::INFO,
+                        format!(
+                            "[INFO] Removed custom functions from deleted file: {}",
+                            path.display()
+                        ),
+                    );
+                }
+                _ => {}
             }
         }
     }
+}
 }

@@ -69,7 +69,7 @@ pub struct Event {
     pub intents: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ForgeConfig {
     pub urls: Vec<String>,
     #[serde(default)]
