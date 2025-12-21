@@ -709,38 +709,32 @@ impl<'a> ForgeScriptParser<'a> {
                 }
 
                 if let Some((name, meta)) = matched_function {
-                    // We found a valid function
+                    // A valid function was identified.
+                    // If a prefix match occurred (e.g., matching '$ping' within '$pingms'), 
+                    // the remaining suffix must be handled as a separate text token.
 
-                    // If we matched a prefix (e.g. $ping from $pingms), we need to handle the suffix
-                    // The iterator has already consumed the full name.
-                    // We need to emit the function token for the matched part,
-                    // and a text token for the suffix.
+                    // Note: The iterator has already advanced past the full identifier.
+                    // The function token spans from 'start' (including any modifiers like '$') 
+                    // to 'used_name_end' (the end of the matched function name).
 
-                    // let func_token_end = start + (used_name_end - name_start_idx) + (name_start_idx - start);
-                    // Wait, start is where '$' is.
-                    // name_start_idx is where name starts.
-                    // used_name_end is where matched name ends.
-                    // So function token is from `start` to `used_name_end`.
-
-                    // But wait, `start` includes modifiers!
-                    // `name_start_idx` is after modifiers.
-                    // So `used_name_end` is correct end of function name.
+                    // 'name_start_idx' accounts for characters after modifiers. 
+                    // Since 'used_name_end' represents the absolute end position of the 
+                    // matched name, it serves as the correct boundary for the function token.
 
                     let token_end = used_name_end;
 
                     // parse args if any
-                    // parse args if any
                     let mut args_text: Option<&str> = None;
                     let mut args_start_offset = 0;
 
-                    // Check for brackets ONLY if we consumed the full name (no suffix)
-                    // If there is a suffix (e.g. $pingms -> $ping), we treat 'ms' as text,
-                    // so we do NOT look for brackets after 'ms'.
-                    // BUT, the iterator is currently at the end of 'ms' (full_name_end).
-                    // If we matched a prefix, we effectively "rewound" to used_name_end.
-                    // But we can't rewind the iterator.
-                    // However, if we have a suffix, it implies we are NOT parsing args for this function
-                    // (unless the suffix is empty, which means exact match).
+                    // Only check for brackets/arguments if the function name was an exact match.
+                    // If a suffix exists (e.g., '$ping' matched in '$pingms'), the 'ms' suffix 
+                    // is treated as literal text, which precludes argument parsing for the prefix.
+
+                    // Note: The iterator has already consumed the full string (up to full_name_end).
+                    // While we logically "rewind" to used_name_end to emit the function token, 
+                    // the physical iterator remains ahead. A non-empty suffix effectively 
+                    // signals that this match should be treated as a no-argument call.
 
                     let has_suffix = used_name_end < full_name_end;
 
@@ -772,19 +766,16 @@ impl<'a> ForgeScriptParser<'a> {
                             last_idx = token_end;
                         }
                     } else {
-                        // We have a suffix. The function call ends at used_name_end.
-                        // The suffix will be handled as text.
-                        // But we need to make sure `last_idx` is updated correctly so the suffix is picked up later?
-                        // Actually, we should emit the suffix token NOW to be safe,
-                        // OR just set last_idx to token_end.
-                        // If we set last_idx = token_end, the next iteration of the main loop
-                        // will pick up text from token_end.
-                        // BUT the iterator `iter` is already at `full_name_end`.
-                        // So the main loop will resume from `full_name_end`.
-                        // The text between `token_end` and `full_name_end` (the suffix)
-                        // would be SKIPPED if we don't handle it here.
+                        // Handle the suffix logic: The function call concludes at 'used_name_end'.
+                        // Any characters between 'used_name_end' and 'full_name_end' (the suffix) 
+                        // must be explicitly captured as text.
 
-                        // So we MUST emit the suffix token here.
+                        // Because the main loop's iterator 'iter' is already positioned at 
+                        // 'full_name_end', simply updating 'last_idx' to 'used_name_end' would 
+                        // cause the suffix to be skipped in the next iteration.
+
+                        // To prevent data loss, we must emit the suffix as a text token immediately 
+                        // and synchronize 'last_idx' with 'full_name_end'.
                         last_idx = full_name_end; // We have consumed up to here
                     }
 
@@ -1373,25 +1364,9 @@ fn validate_arg_enums(
 
                 // Case-sensitive check
                 if !values.contains(&full_text) {
-                    // Calculate start/end for this specific argument
-                    // This is tricky because we don't have exact offsets for each arg in parsed_args structure easily
-                    // We might need to rely on `base_offset` and re-scan or just use the function span?
-                    // Ideally `parse_nested_args` should return offsets.
-                    // For now, let's use a heuristic or just the function span if we can't do better.
-                    // BUT, `parse_nested_args` DOES NOT return offsets.
-                    // However, we can try to find the argument in the source string if we are careful.
-                    // Or we can just mark the whole function call for now, or try to be more specific.
-
                     // Since we don't have exact offsets for individual args, we will mark the whole function call
                     // but add a specific message.
                     // TODO: Improve `parse_nested_args` to return spans.
-
-                    // Wait, `base_offset` is where the args start (after `[`).
-                    // We can try to find the argument by reconstructing the string? No, that's error prone.
-                    // Let's just use the function's span passed to `validate_arg_count` (which is `span` in caller).
-                    // But here we don't have `span`.
-                    // Let's pass `span` to this function.
-
                     diagnostics.push(Diagnostic {
                         message: format!(
                             "Invalid value `{}` for argument `{}` of `${}`. Expected one of: {:?}",
