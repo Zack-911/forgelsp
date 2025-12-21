@@ -10,6 +10,10 @@
 //! - Semantic token highlighting
 //! - Real-time diagnostics
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
 use crate::diagnostics::publish_diagnostics;
 use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
@@ -17,9 +21,6 @@ use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
 use crate::utils::{load_forge_config_full, spawn_log};
 use regex::Regex;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use tower_lsp::{Client, LanguageServer, async_trait, jsonrpc::Result, lsp_types::*};
 
 /// ForgeScript Language Server
@@ -115,12 +116,62 @@ impl LanguageServer for ForgeScriptServer {
                     .expect("Failed to load metadata sources");
 
                 // Load custom functions from config if available
-                if let Some(custom_funcs) = config.custom_functions
-                    && !custom_funcs.is_empty()
-                {
+                if let Some(custom_funcs) = config.custom_functions.filter(|f| !f.is_empty()) {
                     manager
                         .add_custom_functions(custom_funcs)
                         .expect("Failed to add custom functions");
+                }
+
+                // Load custom functions from path if available
+                if let Some(custom_path) = config.custom_functions_path {
+                    spawn_log(
+                        self.client.clone(),
+                        MessageType::INFO,
+                        format!("[INFO] Custom functions path from config: {}", custom_path),
+                    );
+                    for folder in &paths {
+                        let path = folder.join(&custom_path);
+                        spawn_log(
+                            self.client.clone(),
+                            MessageType::INFO,
+                            format!("[INFO] Searching for custom functions in: {:?}", path),
+                        );
+                        if path.exists() {
+                            match manager.load_custom_functions_from_folder(path) {
+                                Ok((files, count)) => {
+                                    spawn_log(
+                                        self.client.clone(),
+                                        MessageType::INFO,
+                                        format!(
+                                            "[INFO] Found {} .js/.ts files, registered {} custom functions",
+                                            files.len(),
+                                            count
+                                        ),
+                                    );
+                                    for f in files {
+                                        spawn_log(
+                                            self.client.clone(),
+                                            MessageType::INFO,
+                                            format!("[INFO] Parsed file: {:?}", f),
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    spawn_log(
+                                        self.client.clone(),
+                                        MessageType::ERROR,
+                                        format!("[ERROR] Failed to load custom functions from folder: {}", e),
+                                    );
+                                }
+                            }
+                        } else {
+                            spawn_log(
+                                self.client.clone(),
+                                MessageType::WARNING,
+                                format!("[WARN] Custom functions path does not exist: {:?}", path),
+                            );
+                        }
+                    }
                 }
 
                 *self.manager.write().unwrap() = Arc::new(manager);
@@ -176,6 +227,13 @@ impl LanguageServer for ForgeScriptServer {
                         },
                     ),
                 ),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -191,6 +249,24 @@ impl LanguageServer for ForgeScriptServer {
                 format!("[INFO] ForgeLSP initialized with {count} functions"),
             )
             .await;
+
+        // Register file watcher for custom functions
+        self.client
+            .register_capability(vec![Registration {
+                id: "watch-custom-functions".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: Some(
+                    serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                        watchers: vec![FileSystemWatcher {
+                            glob_pattern: GlobPattern::String("**/*.{js,ts}".to_string()),
+                            kind: Some(WatchKind::all()),
+                        }],
+                    })
+                    .unwrap(),
+                ),
+            }])
+            .await
+            .ok();
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -456,16 +532,10 @@ impl LanguageServer for ForgeScriptServer {
                     let mut doc = a.description.clone();
 
                     if let Some(enum_name) = &a.enum_name {
-                        if let Ok(enums) = mgr.enums.read() {
-                            if let Some(values) = enums.get(enum_name) {
-                                doc.push_str("\n\n**");
-                                doc.push_str(enum_name);
-                                doc.push_str("**:\n");
-                                for v in values {
-                                    doc.push_str("- ");
-                                    doc.push_str(v);
-                                    doc.push('\n');
-                                }
+                        if let Some(values) = mgr.enums.read().unwrap().get(enum_name) {
+                            doc.push_str(&format!("\n\n**{enum_name}**:\n"));
+                            for v in values {
+                                doc.push_str(&format!("- {v}\n"));
                             }
                         }
                     } else if let Some(values) = &a.arg_enum {
@@ -548,5 +618,37 @@ impl LanguageServer for ForgeScriptServer {
             result_id: None,
             data: tokens,
         })))
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let manager_outer = self.manager.read().unwrap().clone();
+        let manager = manager_outer.as_ref();
+        for change in params.changes {
+            if let Ok(path) = change.uri.to_file_path() {
+                match change.typ {
+                    FileChangeType::CREATED | FileChangeType::CHANGED => {
+                        if let Ok(count) = manager.reload_file(path.clone()) {
+                            spawn_log(
+                                self.client.clone(),
+                                MessageType::INFO,
+                                format!(
+                                    "[INFO] Reloaded custom functions from {:?}: {} functions registered",
+                                    path, count
+                                ),
+                            );
+                        }
+                    }
+                    FileChangeType::DELETED => {
+                        manager.remove_functions_at_path(&path);
+                        spawn_log(
+                            self.client.clone(),
+                            MessageType::INFO,
+                            format!("[INFO] Removed custom functions from deleted file: {:?}", path),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }

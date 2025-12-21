@@ -5,10 +5,11 @@
 //! - Transforming GitHub shorthand URLs to raw githubusercontent URLs
 //! - Asynchronous LSP client logging
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tower_lsp::Client;
 use tower_lsp::lsp_types::MessageType;
 
@@ -50,6 +51,8 @@ pub struct CustomFunction {
     pub brackets: Option<bool>,
     #[serde(default)]
     pub alias: Option<Vec<String>>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +71,8 @@ pub struct ForgeConfig {
     pub multiple_function_colors: Option<bool>,
     #[serde(default)]
     pub custom_functions: Option<Vec<CustomFunction>>,
+    #[serde(default)]
+    pub custom_functions_path: Option<String>,
 }
 
 /// Loads `forgeconfig.json` from any workspace folder.
@@ -128,7 +133,7 @@ fn resolve_github_shorthand(input: String) -> String {
     // Split branch if provided (default to "main" if not specified)
     let (path, branch) = match trimmed.split_once('#') {
         Some((p, b)) => (p, b),
-        None => (trimmed, "main"), // default branch
+        Option::None => (trimmed, "main"), // default branch
     };
 
     // Parse owner/repo/path structure

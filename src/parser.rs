@@ -562,7 +562,7 @@ impl<'a> ForgeScriptParser<'a> {
 
                             // Since we are inside the iterator, we need to advance it manually.
                             let mut depth = 1;
-                            while let Some((_, c)) = iter.next() {
+                            for (_, c) in iter.by_ref() {
                                 if c == '[' {
                                     depth += 1;
                                 } else if c == ']' {
@@ -681,11 +681,7 @@ impl<'a> ForgeScriptParser<'a> {
                 let mut used_name_end = full_name_end;
 
                 // Check for bracket lookahead
-                let has_bracket = if let Some(&(_, '[')) = iter.peek() {
-                    true
-                } else {
-                    false
-                };
+                let has_bracket = matches!(iter.peek(), Some(&(_, '[')));
 
                 if has_bracket {
                     // Case 1: Bracketed call - must match exactly
@@ -862,18 +858,16 @@ impl<'a> ForgeScriptParser<'a> {
                                         ignore_next_line,
                                     );
 
-                                    if !ignore_next_line {
-                                        if let Some(meta_args) = &meta.args {
-                                            validate_arg_enums(
-                                                &name,
-                                                &args_vec,
-                                                meta_args,
-                                                self.manager.clone(),
-                                                &mut diagnostics,
-                                                start, // Use function start for now as we don't have better arg offsets
-                                                self.code,
-                                            );
-                                        }
+                                    if !ignore_next_line && let Some(meta_args) = &meta.args {
+                                        validate_arg_enums(
+                                            &name,
+                                            &args_vec,
+                                            meta_args,
+                                            self.manager.clone(),
+                                            &mut diagnostics,
+                                            start, // Use function start for now as we don't have better arg offsets
+                                            self.code,
+                                        );
                                     }
                                 }
                                 Err(_) => {
@@ -889,23 +883,19 @@ impl<'a> ForgeScriptParser<'a> {
                                     }
                                 }
                             }
-                        } else {
-                            if !ignore_next_line {
-                                diagnostics.push(Diagnostic {
-                                    message: format!("${} does not accept brackets", name),
-                                    start,
-                                    end: last_idx,
-                                });
-                            }
-                        }
-                    } else if meta.brackets == Some(true) {
-                        if !ignore_next_line {
+                        } else if !ignore_next_line {
                             diagnostics.push(Diagnostic {
-                                message: format!("${} expects brackets `[...]`", name),
+                                message: format!("${} does not accept brackets", name),
                                 start,
-                                end: token_end,
+                                end: last_idx,
                             });
                         }
+                    } else if meta.brackets == Some(true) && !ignore_next_line {
+                        diagnostics.push(Diagnostic {
+                            message: format!("${} expects brackets `[...]`", name),
+                            start,
+                            end: token_end,
+                        });
                     }
 
                     tokens.push(Token {
@@ -1499,6 +1489,7 @@ mod tests {
             params: Some(json!([])), // 0 args
             brackets: Some(true),
             alias: None,
+            path: None,
         };
         manager.add_custom_functions(vec![custom_func]).unwrap();
 

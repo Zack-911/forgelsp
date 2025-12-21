@@ -41,10 +41,9 @@ fn is_escaped(text: &str, byte_idx: usize) -> bool {
 /// Handles UTF-16 character counts correctly.
 fn position_to_offset(text: &str, position: Position) -> Option<usize> {
     let mut current_offset = 0;
-    let mut current_line = 0;
 
-    for line in text.split_inclusive('\n') {
-        if current_line == position.line {
+    for (line_num, line) in text.split_inclusive('\n').enumerate() {
+        if line_num as u32 == position.line {
             let mut col = 0;
             for (i, c) in line.char_indices() {
                 if col == position.character {
@@ -59,7 +58,6 @@ fn position_to_offset(text: &str, position: Position) -> Option<usize> {
             return None;
         }
         current_offset += line.len();
-        current_line += 1;
     }
     None
 }
@@ -153,10 +151,8 @@ pub async fn handle_hover(
             // If current_char_idx is on $, we want to include it.
             // If we encounter ANOTHER $, we stop.
 
-            if c == '$' && !is_escaped(&text, byte_pos) {
-                if end_char_idx > start_char_idx {
-                    break;
-                }
+            if c == '$' && !is_escaped(&text, byte_pos) && end_char_idx > start_char_idx {
+                break;
             }
             end_char_idx += 1;
         } else {
@@ -213,7 +209,7 @@ pub async fn handle_hover(
 
                     // Find matching ]
                     let mut depth = 1;
-                    while let Some(inner_c) = chars.next() {
+                    for inner_c in chars.by_ref() {
                         modifier_end_idx += inner_c.len_utf8();
                         if inner_c == '[' {
                             depth += 1;

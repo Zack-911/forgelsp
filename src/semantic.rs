@@ -420,6 +420,7 @@ mod tests {
                 params: None,
                 brackets: None,
                 alias: None,
+                path: None,
             }])
             .expect("Failed to add custom function");
 
@@ -465,6 +466,7 @@ mod tests {
                     params: None,
                     brackets: None,
                     alias: None,
+                    path: None,
                 },
                 CustomFunction {
                     name: "$deleteCache".to_string(),
@@ -472,6 +474,7 @@ mod tests {
                     params: None,
                     brackets: None,
                     alias: None,
+                    path: None,
                 },
             ])
             .expect("Failed to add custom functions");

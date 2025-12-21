@@ -7,6 +7,13 @@
 //!
 //! Supports loading from multiple URLs, GitHub shorthand syntax, and custom user-defined functions.
 
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
+
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future;
@@ -14,12 +21,6 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
 
 use crate::utils::Event;
 
@@ -27,7 +28,7 @@ use crate::utils::Event;
 // 📦 Data Model
 // ==============================
 
-pub type Functions = Vec<Function>;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Function {
@@ -47,7 +48,7 @@ pub struct Function {
 
 impl Function {
     pub fn signature_label(&self) -> String {
-        let args = self.args.as_ref().map(|a| a.as_slice()).unwrap_or(&[]);
+        let args = self.args.as_deref().unwrap_or(&[]);
         let params = args
             .iter()
             .map(|a| {
@@ -188,10 +189,8 @@ impl Fetcher {
         let results = future::join_all(tasks).await;
 
         let mut out = HashMap::new();
-        for r in results {
-            if let Ok(enums) = r {
-                out.extend(enums);
-            }
+        for enums in results.into_iter().flatten() {
+            out.extend(enums);
         }
         Ok(out)
     }
@@ -205,10 +204,8 @@ impl Fetcher {
         let results = future::join_all(tasks).await;
 
         let mut out = Vec::new();
-        for r in results {
-            if let Ok(events) = r {
-                out.extend(events);
-            }
+        for events in results.into_iter().flatten() {
+            out.extend(events);
         }
         Ok(out)
     }
@@ -240,6 +237,24 @@ impl TrieNode {
             child.collect_all(out);
         }
     }
+
+    fn remove_recursive(&mut self, chars: &[char], index: usize, size: &mut usize) -> bool {
+        if index == chars.len() {
+            if self.value.is_some() {
+                self.value = None;
+                *size -= 1;
+                return self.children.is_empty();
+            }
+            return false;
+        }
+
+        let c = chars[index];
+        if let Some(child) = self.children.get_mut(&c) && child.remove_recursive(chars, index + 1, size) {
+            self.children.remove(&c);
+            return self.value.is_none() && self.children.is_empty();
+        }
+        false
+    }
 }
 
 impl FunctionTrie {
@@ -252,6 +267,11 @@ impl FunctionTrie {
             self.size += 1;
         }
         node.value = Some(func);
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        let chars: Vec<char> = key.to_lowercase().chars().collect();
+        self.root.remove_recursive(&chars, 0, &mut self.size);
     }
     pub fn collect_all(&self) -> Vec<Arc<Function>> {
         let mut out = Vec::new();
@@ -311,6 +331,7 @@ pub struct MetadataManager {
     trie: Arc<RwLock<FunctionTrie>>,
     pub enums: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub events: Arc<RwLock<Vec<Event>>>,
+    pub file_map: Arc<RwLock<HashMap<PathBuf, Vec<String>>>>,
 }
 
 impl MetadataManager {
@@ -319,6 +340,7 @@ impl MetadataManager {
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
         let enums = Arc::new(RwLock::new(HashMap::new()));
         let events = Arc::new(RwLock::new(Vec::new()));
+        let file_map = Arc::new(RwLock::new(HashMap::new()));
 
         Ok(Self {
             fetcher,
@@ -326,6 +348,7 @@ impl MetadataManager {
             trie,
             enums,
             events,
+            file_map,
         })
     }
 
@@ -369,13 +392,179 @@ impl MetadataManager {
         Ok(())
     }
 
+    pub fn load_custom_functions_from_folder(&self, path: PathBuf) -> Result<(Vec<PathBuf>, usize)> {
+        if !path.exists() || !path.is_dir() {
+            return Ok((Vec::new(), 0));
+        }
+
+        let mut custom_funcs = Vec::new();
+        let mut files_found = Vec::new();
+
+        self.scan_recursive(&path, &mut custom_funcs, &mut files_found)?;
+
+        Ok((files_found, custom_funcs.len()))
+    }
+
+    fn scan_recursive(&self, path: &Path, funcs: &mut Vec<crate::utils::CustomFunction>, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                self.scan_recursive(&path, funcs, files)?;
+            } else if path.is_file() && let Some(_ext) = path.extension().filter(|&e| e == "js" || e == "ts") {
+                let content = fs::read_to_string(&path)?;
+                let parsed = self.parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
+                
+                let names = self.add_custom_functions(parsed.clone())?;
+                self.file_map.write().unwrap().insert(path.clone(), names);
+
+                funcs.extend(parsed);
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn remove_functions_at_path(&self, path: &Path) {
+        let mut file_map = self.file_map.write().unwrap();
+        if let Some(names) = file_map.remove(path) {
+            let mut trie = self.trie.write().unwrap();
+            for name in names {
+                trie.remove(&name);
+            }
+        }
+    }
+
+    pub fn reload_file(&self, path: PathBuf) -> Result<usize> {
+        if !path.exists() || !path.is_file() {
+            self.remove_functions_at_path(&path);
+            return Ok(0);
+        }
+
+        let content = fs::read_to_string(&path)?;
+        let parsed = self.parse_custom_functions_from_js(&content, path.to_str().unwrap_or_default());
+        
+        // Remove old entries first
+        self.remove_functions_at_path(&path);
+        
+        let count = parsed.len();
+        let names = self.add_custom_functions(parsed)?;
+        self.file_map.write().unwrap().insert(path, names);
+        
+        Ok(count)
+    }
+
+    fn parse_custom_functions_from_js(&self, content: &str, file_path: &str) -> Vec<crate::utils::CustomFunction> {
+        let mut functions = Vec::new();
+
+        // 1. Find all "name:" positions
+        let name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#).unwrap();
+        let name_matches: Vec<_> = name_re.captures_iter(content).map(|c| {
+            let m = c.get(0).unwrap();
+            (m.start(), m.end(), c[1].to_string())
+        }).collect();
+
+        // 2. Find all "params: [" positions and their matching "]"
+        let params_start_re = regex::Regex::new(r#"params:\s*\["#).unwrap();
+        let mut params_ranges = Vec::new();
+        for m in params_start_re.find_iter(content) {
+            let start = m.start();
+            let mut depth = 0;
+            let mut end = None;
+            for (i, c) in content[start..].char_indices() {
+                if c == '[' {
+                    depth += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + i);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = end {
+                params_ranges.push(start..e);
+            }
+        }
+
+        // 3. Filter names that are NOT inside any params range
+        let mut filtered_names = Vec::new();
+        for (start, end_pos, name) in &name_matches {
+            let is_nested = params_ranges.iter().any(|r| r.contains(start));
+            if !is_nested {
+                filtered_names.push((*start, *end_pos, name.clone()));
+            }
+        }
+
+        let desc_double_re = regex::Regex::new(r#"(?s)description:\s*"((?:[^"\\]|\\.)*?)""#).unwrap();
+        let desc_single_re = regex::Regex::new(r#"(?s)description:\s*'((?:[^'\\]|\\.)*?)'"#).unwrap();
+        let desc_backtick_re = regex::Regex::new(r#"(?s)description:\s*`((?:[^`\\]|\\.)*?)`"#).unwrap();
+        let brackets_re = regex::Regex::new(r#"brackets:\s*(true|false)"#).unwrap();
+        let params_re = regex::Regex::new(r#"(?s)params:\s*\[(.*?)\]"#).unwrap();
+        let p_name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#).unwrap();
+
+        for i in 0..filtered_names.len() {
+            let (_start, end_pos, name) = &filtered_names[i];
+            let chunk_end = if i + 1 < filtered_names.len() {
+                filtered_names[i+1].0
+            } else {
+                content.len()
+            };
+            let chunk = &content[*end_pos..chunk_end];
+
+            // Extract metadata from chunk
+            let description = desc_double_re.captures(chunk)
+                .or_else(|| desc_single_re.captures(chunk))
+                .or_else(|| desc_backtick_re.captures(chunk))
+                .map(|c| c[1].to_string());
+
+            let brackets = brackets_re.captures(chunk).map(|c| &c[1] == "true");
+
+            let mut params = None;
+            if let Some(p_cap) = params_re.captures(chunk) {
+                let p_content = &p_cap[1];
+                let p_json_str = format!("[{}]", p_content.replace('\'', "\""));
+                if let Ok(p_json) = serde_json::from_str::<JsonValue>(&p_json_str) {
+                    params = Some(p_json);
+                } else {
+                    let mut names = Vec::new();
+                    for p_cap in p_name_re.captures_iter(p_content) {
+                        names.push(p_cap[1].to_string());
+                    }
+                    if !names.is_empty() {
+                        params = Some(JsonValue::Array(names.into_iter().map(JsonValue::String).collect()));
+                    }
+                }
+            }
+
+            functions.push(crate::utils::CustomFunction {
+                name: name.clone(),
+                description,
+                params,
+                brackets,
+                alias: None,
+                path: Some(file_path.to_string()),
+            });
+        }
+
+        functions
+    }
+
     pub fn add_custom_functions(
         &self,
         custom_funcs: Vec<crate::utils::CustomFunction>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let mut trie = self.trie.write().unwrap();
+        let mut registered_names = Vec::new();
 
         for custom in custom_funcs {
+            // Ensure name starts with $
+            let name = if custom.name.starts_with('$') {
+                custom.name.clone()
+            } else {
+                format!("${}", custom.name)
+            };
+
             // Convert custom function params to standard Arg format
             let args = if let Some(params) = custom.params.clone() {
                 match params {
@@ -444,8 +633,21 @@ impl MetadataManager {
                 None
             };
 
+            // Normalize aliases
+            let aliases = custom.alias.as_ref().map(|v| {
+                v.iter()
+                    .map(|a| {
+                        if a.starts_with('$') {
+                            a.clone()
+                        } else {
+                            format!("${}", a)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+
             let func = Function {
-                name: custom.name.clone(),
+                name: name.clone(),
                 version: JsonValue::String("1.0.0".to_string()),
                 description: custom
                     .description
@@ -455,7 +657,7 @@ impl MetadataManager {
                 args,
                 output: None,
                 category: "custom".to_string(),
-                aliases: custom.alias.clone(),
+                aliases,
                 experimental: None,
                 examples: None,
                 deprecated: None,
@@ -463,7 +665,8 @@ impl MetadataManager {
 
             // Insert the main function
             let arc_func = Arc::new(func.clone());
-            trie.insert(&custom.name, arc_func);
+            trie.insert(&name, arc_func);
+            registered_names.push(name.clone());
 
             // Insert aliases (like load_all does)
             if let Some(aliases) = &func.aliases {
@@ -472,11 +675,12 @@ impl MetadataManager {
                     alias_func.name = alias.clone();
                     let arc_alias_func = Arc::new(alias_func);
                     trie.insert(alias, arc_alias_func);
+                    registered_names.push(alias.clone());
                 }
             }
         }
 
-        Ok(())
+        Ok(registered_names)
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<Function>> {
