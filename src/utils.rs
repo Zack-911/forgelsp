@@ -38,6 +38,10 @@ pub struct CustomFunctionParam {
     pub required: Option<bool>,
     #[serde(default)]
     pub rest: Option<bool>,
+    #[serde(default)]
+    pub arg_enum: Option<Vec<String>>,
+    #[serde(default)]
+    pub enum_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

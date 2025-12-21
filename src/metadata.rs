@@ -585,8 +585,8 @@ impl MetadataManager {
                                         required: param.required,
                                         arg_type: JsonValue::String(param.param_type),
                                         condition: None,
-                                        arg_enum: None,
-                                        enum_name: None,
+                                        arg_enum: param.arg_enum,
+                                        enum_name: param.enum_name,
                                         pointer: None,
                                         pointer_property: None,
                                     });

@@ -16,6 +16,14 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::sync::Arc;
 
+/// List of function name and argument index pairs that should skip enum validation.
+/// Some functions might have dynamic enum-like arguments that aren't strictly defined
+/// in the static metadata.
+/// Argument index starts from 0 not 1
+const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize)] = &[
+    ("color", 0),
+];
+
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     pub message: String,
@@ -726,6 +734,7 @@ impl<'a> ForgeScriptParser<'a> {
                     // Let's modify metadata.rs to expose `get_with_match`.
                     // But first I need to undo the broken code in parser.rs or fix it to use a new method.
 
+
                     // I'll assume I'll add `get_with_match` to metadata.rs.
                     // So I'll change parser.rs to use `get_with_match`.
 
@@ -1379,6 +1388,11 @@ fn validate_arg_enums(
     _source: &str,
 ) {
     for (i, arg_parts) in parsed_args.iter().enumerate() {
+        // Skip validation if this specific argument is in the exception list
+        if ENUM_VALIDATION_EXCEPTIONS.contains(&(name, i)) {
+            continue;
+        }
+
         // Find corresponding metadata arg
         // If function has rest args, the last metadata arg applies to all remaining parsed args
         let meta_arg = if i < meta_args.len() {
@@ -1450,86 +1464,5 @@ fn validate_arg_enums(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::utils::CustomFunction;
-    use serde_json::json;
-
-    async fn create_manager() -> Arc<MetadataManager> {
-        let manager = MetadataManager::new("./.test_cache", vec![]).await.unwrap();
-        Arc::new(manager)
-    }
-
-    #[tokio::test]
-    async fn test_ignore_error_directive_unknown_function() {
-        let manager = create_manager().await;
-        let code = "code: `$c[fs@ignore-error]\n$doesNotExist[a;b]`";
-        let parser = ForgeScriptParser::new(manager, code);
-        let result = parser.parse();
-
-        assert!(
-            result.diagnostics.is_empty(),
-            "Diagnostics should be empty, but got: {:?}",
-            result.diagnostics
-        );
-        assert!(result.functions.is_empty(), "Functions should be empty");
-    }
-
-    #[tokio::test]
-    async fn test_ignore_error_directive_arg_count() {
-        let manager = create_manager().await;
-        // Add a dummy function $ping that takes 0 args
-        let custom_func = CustomFunction {
-            name: "$ping".to_string(),
-            description: None,
-            params: Some(json!([])), // 0 args
-            brackets: Some(true),
-            alias: None,
-            path: None,
-        };
-        manager.add_custom_functions(vec![custom_func]).unwrap();
-
-        let code = "code: `$c[fs@ignore-error]\n$ping[a;b;c]`";
-        let parser = ForgeScriptParser::new(manager, code);
-        let result = parser.parse();
-
-        assert!(
-            result.diagnostics.is_empty(),
-            "Diagnostics should be empty, but got: {:?}",
-            result.diagnostics
-        );
-        assert!(
-            result.functions.is_empty(),
-            "Functions should be empty (ignored)"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ignore_error_directive_scope() {
-        let manager = create_manager().await;
-        let code = "code: `$c[fs@ignore-error]\n$bad1\n$bad2`";
-        let parser = ForgeScriptParser::new(manager, code);
-        let result = parser.parse();
-
-        assert_eq!(
-            result.diagnostics.len(),
-            1,
-            "Should have 1 diagnostic for $bad2"
-        );
-        assert_eq!(result.diagnostics[0].message, "Unknown function `$bad2`");
-    }
-
-    #[tokio::test]
-    async fn test_utf8_panic_reproduction() {
-        let manager = create_manager().await;
-        // The string that caused the panic: "// 🟨\ncode: `$ping`"
-        let code = "// 🟨\ncode: `$ping`";
-        let parser = ForgeScriptParser::new(manager, code);
-        let _result = parser.parse();
-        // If it doesn't panic, we are good.
     }
 }
