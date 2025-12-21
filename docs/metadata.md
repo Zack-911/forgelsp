@@ -237,6 +237,9 @@ pub struct MetadataManager {
     fetcher: Fetcher,
     fetch_urls: Vec<String>,
     trie: Arc<RwLock<FunctionTrie>>,
+    pub enums: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    pub events: Arc<RwLock<Vec<Event>>>,
+    pub file_map: Arc<RwLock<HashMap<PathBuf, Vec<String>>>>,
 }
 ```
 
@@ -272,12 +275,12 @@ pub async fn load_all(&self) -> Result<()> {
 - Alias functions have the alias as their `name` field
 - Allows lookup by either primary name or alias
 
-### `add_custom_functions` Method
+### `add_custom_functions` Method (Revised)
 
 Integrates user-defined functions:
 
 ```rust
-pub fn add_custom_functions(&self, custom_funcs: Vec<CustomFunction>) -> Result<()> {
+pub fn add_custom_functions(&self, custom_funcs: Vec<CustomFunction>) -> Result<Vec<String>> {
     let mut trie = self.trie.write().unwrap();
     
     for custom in custom_funcs {

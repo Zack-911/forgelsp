@@ -100,6 +100,7 @@ pub struct ForgeConfig {
     pub urls: Vec<String>,                          // Metadata source URLs
     pub multiple_function_colors: Option<bool>,     // Enable multi-color highlighting
     pub custom_functions: Option<Vec<CustomFunction>>, // User-defined functions
+    pub custom_functions_path: Option<String>,      // Path to folder with .js/.ts functions
 }
 ```
 
@@ -111,6 +112,7 @@ pub struct ForgeConfig {
     "github:myorg/custom-functions#dev"
   ],
   "multiple_function_colors": true,
+  "custom_functions_path": "./custom",
   "custom_functions": [
     {
       "name": "$customHttp",

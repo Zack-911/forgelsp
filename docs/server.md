@@ -51,15 +51,14 @@ ServerCapabilities {
         ...
     }),
     semantic_tokens_provider: SemanticTokensOptions {
-        legend: SemanticTokensLegend {
-            token_types: vec![
-                FUNCTION, KEYWORD, NUMBER, PARAMETER, STRING, COMMENT
-            ],
-            ...
-        },
-        full: Some(true),
         ...
     },
+    workspace: Some(WorkspaceServerCapabilities {
+        workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+            supported: Some(true),
+            change_notifications: Some(OneOf::Left(true)),
+        }),
+    }),
     ...
 }
 ```
@@ -80,6 +79,18 @@ async fn initialized(&self, _: InitializedParams) {
         MessageType::INFO,
         format!("[INFO] ForgeLSP initialized with {} functions", count)
     ).await;
+
+    // Register global file watcher for .js and .ts files
+    self.client.register_capability(vec![Registration {
+        id: "watch-custom-functions".to_string(),
+        method: "workspace/didChangeWatchedFiles".to_string(),
+        register_options: Some(json!({
+            "watchers": [{
+                "globPattern": "**/*.{js,ts}",
+                "kind": 7 // Create, Change, Delete
+            }]
+        })),
+    }]).await;
 }
 ```
 
@@ -128,17 +139,30 @@ Called when document content changes:
 
 ```rust
 async fn did_change(&self, params: DidChangeTextDocumentParams) {
-    if let Some(change) = params.content_changes.into_iter().next() {
-        let text = change.text;
-        
-        // Update cache
-        self.documents.write().unwrap().insert(uri.clone(), text.clone());
-        
-        // Reparse
-        self.process_text(uri, text).await;
+    // ... update cache and reparse ...
+}
+
+### `did_change_watched_files`
+
+Handles external file changes for custom functions:
+
+```rust
+async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+    for change in params.changes {
+        let path = change.uri.to_file_path()?;
+        match change.typ {
+            CREATED | CHANGED => {
+                manager.reload_file(path).await?;
+            }
+            DELETED => {
+                manager.remove_functions_at_path(&path);
+            }
+        }
     }
 }
 ```
+
+This ensures that adding, removing, or modifying `.js`/`.ts` files in the custom functions directory immediately updates the LSP's metadata without requiring a restart.
 
 **Full Sync Mode:**
 - Client sends entire document on each change
