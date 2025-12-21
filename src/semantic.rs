@@ -1,6 +1,6 @@
 //! # Semantic Token Extraction Module
 //!
-//! Extracts semantic tokens from ForgeScript code for syntax highlighting.
+//! Extracts semantic tokens from `ForgeScript` code for syntax highlighting.
 //! Validates function names against metadata to ensure only valid functions are highlighted.
 //!
 //! Supports:
@@ -12,11 +12,12 @@
 use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
 use crate::metadata::MetadataManager;
 
-/// Regex for extracting code blocks from ForgeScript files.
+/// Regex for extracting code blocks from `ForgeScript` files.
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)code:\s*`((?:[^`\\]|\\.)*)`").expect("Semantic: regex compile failed")
 });
@@ -98,7 +99,7 @@ fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
     None
 }
 
-/// Extracts semantic tokens from ForgeScript source code, optionally using
+/// Extracts semantic tokens from `ForgeScript` source code, optionally using
 /// alternating colors for function calls.
 ///
 /// # Arguments
@@ -111,7 +112,7 @@ fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
 pub fn extract_semantic_tokens_with_colors(
     source: &str,
     use_function_colors: bool,
-    manager: Arc<MetadataManager>,
+    manager: &Arc<MetadataManager>,
 ) -> Vec<SemanticToken> {
     let mut tokens = Vec::new();
 
@@ -121,7 +122,7 @@ pub fn extract_semantic_tokens_with_colors(
             let code = match_group.as_str();
 
             let found_tokens =
-                extract_tokens_from_code(code, content_start, use_function_colors, manager.clone());
+                extract_tokens_from_code(code, content_start, use_function_colors, manager);
             tokens.extend(found_tokens);
         }
     }
@@ -135,7 +136,7 @@ fn extract_tokens_from_code(
     code: &str,
     code_start: usize,
     use_function_colors: bool,
-    manager: Arc<MetadataManager>,
+    manager: &Arc<MetadataManager>,
 ) -> Vec<(usize, usize, u32)> {
     let mut found = Vec::new();
     let bytes = code.as_bytes();
@@ -151,141 +152,29 @@ fn extract_tokens_from_code(
         // Check for functions
         if c == '$' && !is_char_escaped(bytes, i) {
             // Check for $c[...] (comment)
-            if idx + 1 < char_positions.len()
-                && char_positions[idx + 1].1 == 'c'
-                && idx + 2 < char_positions.len()
-                && char_positions[idx + 2].1 == '['
-            {
-                // Found comment function
-                if let Some(end_idx) = find_matching_bracket_raw(bytes, char_positions[idx + 2].0) {
-                    // Highlight entire $c[...] as KEYWORD (comment)
-                    found.push((i + code_start, end_idx + 1 + code_start, 5));
-                    // Skip to after the closing bracket
-                    while idx < char_positions.len() && char_positions[idx].0 <= end_idx {
-                        idx += 1;
-                    }
-                    continue;
-                }
+            if let Some((end_idx, next_idx)) = try_extract_comment(code, idx, &char_positions) {
+                found.push((i + code_start, end_idx + 1 + code_start, 5));
+                idx = next_idx;
+                continue;
             }
 
             // Check for $esc[...] or $escapeCode[...] (escape functions)
-            if let Some(esc_end) = check_escape_function(bytes, i) {
-                // Highlight function name
-                let name_end = i
-                    + if bytes.get(i + 1..).and_then(|b| b.get(..4)) == Some(b"esc[") {
-                        4
-                    } else {
-                        11
-                    };
+            if let Some((name_end, esc_end, next_idx)) =
+                try_extract_escape(code, idx, &char_positions)
+            {
                 found.push((i + code_start, name_end + code_start, 0));
-                // Highlight content as STRING
                 if name_end < esc_end {
                     found.push((name_end + code_start, esc_end + code_start, 4));
                 }
-                // Highlight closing bracket
                 found.push((esc_end + code_start, esc_end + 1 + code_start, 0));
-                // Skip to after the escape function
-                while idx < char_positions.len() && char_positions[idx].0 <= esc_end {
-                    idx += 1;
-                }
+                idx = next_idx;
                 continue;
             }
 
             // Try incremental matching against metadata
-            let mut best_match_len = 0;
-            let mut best_match_char_count = 0;
-            let mut j = idx + 1;
-
-            // Skip modifiers
-            while j < char_positions.len() {
-                let (_, c) = char_positions[j];
-                if c == '!' || c == '#' {
-                    j += 1;
-                } else if c == '@' {
-                    // Check for @[...]
-                    if j + 1 < char_positions.len() && char_positions[j + 1].1 == '[' {
-                        let open_bracket_byte_idx = char_positions[j + 1].0;
-                        if let Some(close_byte_idx) =
-                            find_matching_bracket_raw(bytes, open_bracket_byte_idx)
-                        {
-                            // Advance j to after the closing bracket
-                            while j < char_positions.len() && char_positions[j].0 <= close_byte_idx
-                            {
-                                j += 1;
-                            }
-                        } else {
-                            // Unmatched bracket, stop modifier parsing
-                            break;
-                        }
-                    } else {
-                        // Just @ without [, stop modifier parsing
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // If we ran out of characters, stop
-            if j >= char_positions.len() {
-                idx += 1;
-                continue;
-            }
-
-            let name_start_byte_idx = char_positions[j].0;
-            let mut name_end_char_idx = j;
-
-            // Find the end of the identifier
-            while name_end_char_idx < char_positions.len()
-                && (char_positions[name_end_char_idx].1.is_alphanumeric()
-                    || char_positions[name_end_char_idx].1 == '_')
+            if let Some((best_match_len, best_match_char_count)) =
+                try_extract_metadata_function(code, idx, &char_positions, manager)
             {
-                name_end_char_idx += 1;
-            }
-
-            // Check if the next character is '['
-            let has_bracket = name_end_char_idx < char_positions.len()
-                && char_positions[name_end_char_idx].1 == '[';
-
-            if has_bracket {
-                // Case 1: Bracketed call - check full identifier
-                let end_byte_idx = if name_end_char_idx < char_positions.len() {
-                    char_positions[name_end_char_idx].0
-                } else {
-                    code.len()
-                };
-
-                if let Some(full_name) = code.get(name_start_byte_idx..end_byte_idx) {
-                    let lookup_key = format!("${full_name}");
-                    if manager.get_exact(&lookup_key).is_some() {
-                        best_match_len = end_byte_idx - i;
-                        best_match_char_count = name_end_char_idx - idx;
-                    }
-                }
-            } else {
-                // Case 2: No bracket - find longest prefix match
-                // We iterate from the full identifier length down to 1 char
-                let mut check_idx = name_end_char_idx;
-                while check_idx > j {
-                    let end_byte_idx = if check_idx < char_positions.len() {
-                        char_positions[check_idx].0
-                    } else {
-                        code.len()
-                    };
-
-                    if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
-                        let lookup_key = format!("${name_part}");
-                        if manager.get_exact(&lookup_key).is_some() {
-                            best_match_len = end_byte_idx - i;
-                            best_match_char_count = check_idx - idx;
-                            break; // Found longest match
-                        }
-                    }
-                    check_idx -= 1;
-                }
-            }
-
-            if best_match_len > 0 {
                 let token_type = if use_function_colors {
                     let colors = [0, 3];
                     let color = colors[(function_color_index as usize) % colors.len()];
@@ -343,6 +232,135 @@ fn extract_tokens_from_code(
 
     found.sort_by_key(|(s, _, _)| *s);
     found
+}
+
+fn try_extract_comment(
+    code: &str,
+    idx: usize,
+    char_positions: &[(usize, char)],
+) -> Option<(usize, usize)> {
+    if idx + 2 < char_positions.len()
+        && char_positions[idx + 1].1 == 'c'
+        && char_positions[idx + 2].1 == '['
+    {
+        let bytes = code.as_bytes();
+        if let Some(end_idx) = find_matching_bracket_raw(bytes, char_positions[idx + 2].0) {
+            let mut next_idx = idx;
+            while next_idx < char_positions.len() && char_positions[next_idx].0 <= end_idx {
+                next_idx += 1;
+            }
+            return Some((end_idx, next_idx));
+        }
+    }
+    None
+}
+
+fn try_extract_escape(
+    code: &str,
+    idx: usize,
+    char_positions: &[(usize, char)],
+) -> Option<(usize, usize, usize)> {
+    let bytes = code.as_bytes();
+    let i = char_positions[idx].0;
+    if let Some(esc_end) = check_escape_function(bytes, i) {
+        let name_end = i + if bytes.get(i + 1..).and_then(|b| b.get(..4)) == Some(b"esc[") {
+            4
+        } else {
+            11
+        };
+        let mut next_idx = idx;
+        while next_idx < char_positions.len() && char_positions[next_idx].0 <= esc_end {
+            next_idx += 1;
+        }
+        return Some((name_end, esc_end, next_idx));
+    }
+    None
+}
+
+fn try_extract_metadata_function(
+    code: &str,
+    idx: usize,
+    char_positions: &[(usize, char)],
+    manager: &MetadataManager,
+) -> Option<(usize, usize)> {
+    let i = char_positions[idx].0;
+    let mut j = idx + 1;
+
+    // Skip modifiers
+    while j < char_positions.len() {
+        let (_, c) = char_positions[j];
+        if c == '!' || c == '#' {
+            j += 1;
+        } else if c == '@' {
+            if j + 1 < char_positions.len() && char_positions[j + 1].1 == '[' {
+                let open_bracket_byte_idx = char_positions[j + 1].0;
+                if let Some(close_byte_idx) =
+                    find_matching_bracket_raw(code.as_bytes(), open_bracket_byte_idx)
+                {
+                    while j < char_positions.len() && char_positions[j].0 <= close_byte_idx {
+                        j += 1;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if j >= char_positions.len() {
+        return None;
+    }
+
+    let name_start_byte_idx = char_positions[j].0;
+    let mut name_end_char_idx = j;
+
+    while name_end_char_idx < char_positions.len()
+        && (char_positions[name_end_char_idx].1.is_alphanumeric()
+            || char_positions[name_end_char_idx].1 == '_')
+    {
+        name_end_char_idx += 1;
+    }
+
+    let has_bracket =
+        name_end_char_idx < char_positions.len() && char_positions[name_end_char_idx].1 == '[';
+
+    if has_bracket {
+        let end_byte_idx = if name_end_char_idx < char_positions.len() {
+            char_positions[name_end_char_idx].0
+        } else {
+            code.len()
+        };
+
+        if let Some(full_name) = code.get(name_start_byte_idx..end_byte_idx) {
+            let lookup_key = format!("${full_name}");
+            if manager.get_exact(&lookup_key).is_some() {
+                return Some((end_byte_idx - i, name_end_char_idx - idx));
+            }
+        }
+    } else {
+        let mut check_idx = name_end_char_idx;
+        while check_idx > j {
+            let end_byte_idx = if check_idx < char_positions.len() {
+                char_positions[check_idx].0
+            } else {
+                code.len()
+            };
+
+            if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
+                let lookup_key = format!("${name_part}");
+                if manager.get_exact(&lookup_key).is_some() {
+                    return Some((end_byte_idx - i, check_idx - idx));
+                }
+            }
+            check_idx -= 1;
+        }
+    }
+
+    None
 }
 
 /// Checks if the function at `dollar_idx` is an escape function ($esc or $escapeCode).
@@ -419,7 +437,7 @@ fn offset_to_position(text: &str, offset: usize) -> Position {
             line += 1;
             col = 0;
         } else {
-            col += ch.len_utf16() as u32;
+            col += u32::try_from(ch.len_utf16()).expect("UTF-16 length exceeds u32");
         }
     }
 
@@ -433,9 +451,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_function_modifiers() {
-        let manager = MetadataManager::new("./.cache_test", vec![])
-            .await
-            .expect("Failed to create manager");
+        let manager =
+            MetadataManager::new("./.cache_test", vec![]).expect("Failed to create manager");
 
         // Add a test function
         manager
@@ -463,7 +480,7 @@ mod tests {
         ];
 
         for (code, should_match) in cases {
-            let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+            let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
             if should_match {
                 assert!(!tokens.is_empty(), "Failed to match {}", code);
                 assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
@@ -479,7 +496,6 @@ mod tests {
     #[tokio::test]
     async fn test_bracket_and_prefix_matching() {
         let manager = MetadataManager::new("./.cache_test_semantic", vec![])
-            .await
             .expect("Failed to create manager");
 
         // Add test functions
@@ -523,7 +539,7 @@ mod tests {
         ];
 
         for (code, should_match, expected_name) in cases {
-            let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+            let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
             if should_match {
                 assert!(!tokens.is_empty(), "Failed to match {}", code);
                 assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
@@ -545,7 +561,6 @@ mod tests {
     #[tokio::test]
     async fn test_utf8_boundaries() {
         let manager = MetadataManager::new("./.cache_test_semantic_utf8", vec![])
-            .await
             .expect("Failed to create manager");
         let manager = Arc::new(manager);
 
@@ -553,7 +568,7 @@ mod tests {
         let code = "🔔\ncode: `🔔$ping`";
 
         // Should not panic
-        let tokens = extract_semantic_tokens_with_colors(code, false, manager.clone());
+        let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
 
         // Just checking it doesn't panic is enough for this test.
         assert!(tokens.is_empty() || !tokens.is_empty());

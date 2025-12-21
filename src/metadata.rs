@@ -437,7 +437,7 @@ impl MetadataManager {
     /// # Arguments
     /// * `cache_dir` - Path for caching fetched metadata.
     /// * `fetch_urls` - Initial list of metadata source URLs.
-    pub async fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
+    pub fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
         let fetcher = Fetcher::new(cache_dir);
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
         let enums = Arc::new(RwLock::new(HashMap::new()));
@@ -656,22 +656,22 @@ impl MetadataManager {
             .expect("MetadataManager: regex compile failed");
         let desc_single_re = regex::Regex::new(r#"(?s)description:\s*'((?:[^'\\]|\\.)*?)'"#)
             .expect("MetadataManager: regex compile failed");
-        let desc_backtick_re = regex::Regex::new(r#"(?s)description:\s*`((?:[^`\\]|\\.)*?)`"#)
+        let desc_backtick_re = regex::Regex::new(r"(?s)description:\s*`((?:[^`\\]|\\.)*?)`")
             .expect("MetadataManager: regex compile failed");
-        let brackets_re = regex::Regex::new(r#"brackets:\s*(true|false)"#)
+        let brackets_re = regex::Regex::new(r"brackets:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
-        let params_re = regex::Regex::new(r#"(?s)params:\s*\[(.*?)\]"#)
+        let params_re = regex::Regex::new(r"(?s)params:\s*\[(.*?)\]")
             .expect("MetadataManager: regex compile failed");
         let p_name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#)
             .expect("MetadataManager: regex compile failed");
 
         let obj_re =
-            regex::Regex::new(r#"(?s)\{(.*?)\}"#).expect("MetadataManager: regex compile failed");
-        let required_re = regex::Regex::new(r#"required:\s*(true|false)"#)
+            regex::Regex::new(r"(?s)\{(.*?)\}").expect("MetadataManager: regex compile failed");
+        let required_re = regex::Regex::new(r"required:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
-        let rest_re = regex::Regex::new(r#"rest:\s*(true|false)"#)
+        let rest_re = regex::Regex::new(r"rest:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
-        let type_re = regex::Regex::new(r#"type:\s*([^,}\n\s]+)"#)
+        let type_re = regex::Regex::new(r"type:\s*([^,}\n\s]+)")
             .expect("MetadataManager: regex compile failed");
 
         for i in 0..filtered_names.len() {

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tower_lsp::Client;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
 /// Spawns an asynchronous task to log a message to the LSP client.
@@ -86,7 +87,7 @@ pub struct ForgeConfig {
 ///   github:owner/repo/path#branch
 ///
 /// These are expanded to:
-///   https://raw.githubusercontent.com/owner/repo/<branch>/forge.json
+///   `<https://raw.githubusercontent.com/owner/repo/<branch>/forge.json>`
 pub fn load_forge_config(workspace_folders: &[PathBuf]) -> Option<Vec<String>> {
     load_forge_config_full(workspace_folders).map(|cfg| cfg.urls)
 }
@@ -124,7 +125,7 @@ pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<ForgeConf
 ///   github:owner/repo/path/to/file.json
 ///
 /// Output:
-///   <https://raw.githubusercontent.com/owner/repo/<branch>/path/to/file.json>
+///   `<https://raw.githubusercontent.com/owner/repo/<branch>/path/to/file.json>`
 fn resolve_github_shorthand(input: String) -> String {
     // Only rewrite GitHub-style keys. Leave normal URLs untouched.
     if !input.starts_with("github:") {

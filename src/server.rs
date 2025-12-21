@@ -1,6 +1,6 @@
 //! # LSP Server Implementation
 //!
-//! Implements the `LanguageServer` trait from Tower LSP for ForgeScript.
+//! Implements the `LanguageServer` trait from Tower LSP for `ForgeScript`.
 //!
 //! Provides:
 //! - Document synchronization (full sync mode)
@@ -11,6 +11,7 @@
 //! - Real-time diagnostics
 
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -25,17 +26,18 @@ use tower_lsp::Client;
 use tower_lsp::LanguageServer;
 use tower_lsp::async_trait;
 use tower_lsp::jsonrpc::Result;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
-/// Regex for identifying ForgeScript functions in signature help.
+/// Regex for identifying `ForgeScript` functions in signature help.
 static SIGNATURE_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").expect("Server: regex compile failed")
 });
 
-/// ForgeScript Language Server
+/// `ForgeScript` Language Server
 ///
 /// Maintains shared state for document content, parse results, and function metadata.
-/// All state is wrapped in Arc<RwLock<>> for thread-safe concurrent access.
+/// All state is wrapped in Arc<`RwLock`<>> for thread-safe concurrent access.
 
 #[derive(Debug)]
 pub struct ForgeScriptServer {
@@ -99,13 +101,127 @@ impl ForgeScriptServer {
             if col == utf16_col {
                 return i;
             }
-            col += c.len_utf16() as u32;
+            col += u32::try_from(c.len_utf16()).expect("UTF-16 length exceeds u32");
         }
         if col == utf16_col {
             return line.len();
         }
         // Fallback to clamping to line length if out of bounds
         line.len()
+    }
+}
+
+/// Helper to load custom functions from folders specified in the config.
+fn load_custom_functions_from_path(
+    client: &Client,
+    manager: &MetadataManager,
+    paths: &[PathBuf],
+    custom_path: &str,
+) {
+    spawn_log(
+        client.clone(),
+        MessageType::INFO,
+        format!("[INFO] Custom functions path from config: {custom_path}"),
+    );
+    for folder in paths {
+        let path = folder.join(custom_path);
+        spawn_log(
+            client.clone(),
+            MessageType::INFO,
+            format!(
+                "[INFO] Searching for custom functions in: {}",
+                path.display()
+            ),
+        );
+        if path.exists() {
+            match manager.load_custom_functions_from_folder(path) {
+                Ok((files, count)) => {
+                    spawn_log(
+                        client.clone(),
+                        MessageType::INFO,
+                        format!(
+                            "[INFO] Found {files_count} .js/.ts files, registered {count} custom functions",
+                            files_count = files.len()
+                        ),
+                    );
+                    for f in files {
+                        spawn_log(
+                            client.clone(),
+                            MessageType::INFO,
+                            format!("[INFO] Parsed file: {}", f.display()),
+                        );
+                    }
+                }
+                Err(e) => {
+                    spawn_log(
+                        client.clone(),
+                        MessageType::ERROR,
+                        format!("[ERROR] Failed to load custom functions from folder: {e}"),
+                    );
+                }
+            }
+        } else {
+            spawn_log(
+                client.clone(),
+                MessageType::WARNING,
+                format!(
+                    "[WARN] Custom functions path does not exist: {}",
+                    path.display()
+                ),
+            );
+        }
+    }
+}
+
+/// Returns the server capabilities for this LSP.
+fn build_capabilities() -> ServerCapabilities {
+    ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: Some(vec!["$".into(), ".".into()]),
+            ..Default::default()
+        }),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec![
+                "$".into(),
+                "[".into(),
+                ";".into(),
+                ",".into(),
+                " ".into(),
+            ]),
+            retrigger_characters: Some(vec![",".into(), " ".into()]),
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+        }),
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
+                work_done_progress_options: WorkDoneProgressOptions {
+                    work_done_progress: None,
+                },
+                legend: SemanticTokensLegend {
+                    token_types: vec![
+                        SemanticTokenType::FUNCTION,  // 0
+                        SemanticTokenType::KEYWORD,   // 1
+                        SemanticTokenType::NUMBER,    // 2
+                        SemanticTokenType::PARAMETER, // 3
+                        SemanticTokenType::STRING,    // 4
+                        SemanticTokenType::COMMENT,   // 5
+                    ],
+                    token_modifiers: vec![],
+                },
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+        )),
+        workspace: Some(WorkspaceServerCapabilities {
+            workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            file_operations: None,
+        }),
+        ..Default::default()
     }
 }
 
@@ -128,7 +244,6 @@ impl LanguageServer for ForgeScriptServer {
             if let Some(config) = load_forge_config_full(&paths) {
                 let urls = config.urls.clone();
                 let manager = MetadataManager::new("./.cache", urls)
-                    .await
                     .expect("Failed to initialize metadata manager");
                 manager
                     .load_all()
@@ -144,55 +259,7 @@ impl LanguageServer for ForgeScriptServer {
 
                 // Load custom functions from path if available
                 if let Some(custom_path) = config.custom_functions_path {
-                    spawn_log(
-                        self.client.clone(),
-                        MessageType::INFO,
-                        format!("[INFO] Custom functions path from config: {custom_path}"),
-                    );
-                    for folder in &paths {
-                        let path = folder.join(&custom_path);
-                        spawn_log(
-                            self.client.clone(),
-                            MessageType::INFO,
-                            format!("[INFO] Searching for custom functions in: {path:?}"),
-                        );
-                        if path.exists() {
-                            match manager.load_custom_functions_from_folder(path) {
-                                Ok((files, count)) => {
-                                    spawn_log(
-                                        self.client.clone(),
-                                        MessageType::INFO,
-                                        format!(
-                                            "[INFO] Found {files_count} .js/.ts files, registered {count} custom functions",
-                                            files_count = files.len()
-                                        ),
-                                    );
-                                    for f in files {
-                                        spawn_log(
-                                            self.client.clone(),
-                                            MessageType::INFO,
-                                            format!("[INFO] Parsed file: {f:?}"),
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    spawn_log(
-                                        self.client.clone(),
-                                        MessageType::ERROR,
-                                        format!(
-                                            "[ERROR] Failed to load custom functions from folder: {e}"
-                                        ),
-                                    );
-                                }
-                            }
-                        } else {
-                            spawn_log(
-                                self.client.clone(),
-                                MessageType::WARNING,
-                                format!("[WARN] Custom functions path does not exist: {path:?}"),
-                            );
-                        }
-                    }
+                    load_custom_functions_from_path(&self.client, &manager, &paths, &custom_path);
                 }
 
                 *self.manager.write().expect("Server: manager lock poisoned") = Arc::new(manager);
@@ -208,58 +275,7 @@ impl LanguageServer for ForgeScriptServer {
         }
 
         Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
-                )),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
-                    trigger_characters: Some(vec!["$".into(), ".".into()]),
-                    ..Default::default()
-                }),
-                signature_help_provider: Some(SignatureHelpOptions {
-                    trigger_characters: Some(vec![
-                        "$".into(),
-                        "[".into(),
-                        ";".into(),
-                        ",".into(),
-                        " ".into(),
-                    ]),
-                    retrigger_characters: Some(vec![",".into(), " ".into()]),
-                    work_done_progress_options: WorkDoneProgressOptions::default(),
-                }),
-                semantic_tokens_provider: Some(
-                    SemanticTokensServerCapabilities::SemanticTokensOptions(
-                        SemanticTokensOptions {
-                            work_done_progress_options: WorkDoneProgressOptions {
-                                work_done_progress: None,
-                            },
-                            legend: SemanticTokensLegend {
-                                token_types: vec![
-                                    SemanticTokenType::FUNCTION,  // 0
-                                    SemanticTokenType::KEYWORD,   // 1
-                                    SemanticTokenType::NUMBER,    // 2
-                                    SemanticTokenType::PARAMETER, // 3
-                                    SemanticTokenType::STRING,    // 4
-                                    SemanticTokenType::COMMENT,   // 5
-                                ],
-                                token_modifiers: vec![],
-                            },
-                            range: Some(false),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                        },
-                    ),
-                ),
-                workspace: Some(WorkspaceServerCapabilities {
-                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
-                        supported: Some(true),
-                        change_notifications: Some(OneOf::Left(true)),
-                    }),
-                    file_operations: None,
-                }),
-                ..Default::default()
-            },
+            capabilities: build_capabilities(),
             ..Default::default()
         })
     }
@@ -571,9 +587,9 @@ impl LanguageServer for ForgeScriptServer {
                             .expect("Server: enums lock poisoned")
                             .get(enum_name)
                         {
-                            doc.push_str(&format!("\n\n**{enum_name}**:\n"));
+                            let _ = writeln!(doc, "\n\n**{enum_name}**:");
                             for v in values {
-                                doc.push_str(&format!("- {v}\n"));
+                                let _ = writeln!(doc, "- {v}");
                             }
                         }
                     } else if let Some(values) = &a.arg_enum {
@@ -649,7 +665,7 @@ impl LanguageServer for ForgeScriptServer {
             .read()
             .expect("Server: manager lock poisoned")
             .clone();
-        let tokens = extract_semantic_tokens_with_colors(text, use_colors, mgr);
+        let tokens = extract_semantic_tokens_with_colors(text, use_colors, &mgr);
 
         spawn_log(
             self.client.clone(),
@@ -683,7 +699,8 @@ impl LanguageServer for ForgeScriptServer {
                                 self.client.clone(),
                                 MessageType::INFO,
                                 format!(
-                                    "[INFO] Reloaded custom functions from {path:?}: {count} functions registered"
+                                    "[INFO] Reloaded custom functions from {}: {count} functions registered",
+                                    path.display()
                                 ),
                             );
                         }
@@ -693,7 +710,10 @@ impl LanguageServer for ForgeScriptServer {
                         spawn_log(
                             self.client.clone(),
                             MessageType::INFO,
-                            format!("[INFO] Removed custom functions from deleted file: {path:?}"),
+                            format!(
+                                "[INFO] Removed custom functions from deleted file: {}",
+                                path.display()
+                            ),
                         );
                     }
                     _ => {}

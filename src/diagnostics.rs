@@ -5,6 +5,7 @@
 
 use crate::parser::Diagnostic as ParseDiagnostic;
 use crate::server::ForgeScriptServer;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
 /// Converts a byte offset in the source text to an LSP Position (line, character).

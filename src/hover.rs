@@ -5,6 +5,7 @@
 //! when users hover over function names in their code.
 
 use tower_lsp::jsonrpc::Result;
+#[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
 use crate::server::ForgeScriptServer;

@@ -1,6 +1,6 @@
 //! # ForgeLSP Main Entry Point
 //!
-//! Initializes the Language Server Protocol server for ForgeScript.
+//! Initializes the Language Server Protocol server for `ForgeScript`.
 //!
 //! ## Initialization Flow:
 //! 1. Detect workspace folders (defaults to current directory)
@@ -28,7 +28,7 @@ use crate::metadata::MetadataManager;
 use crate::server::ForgeScriptServer;
 use crate::utils::{load_forge_config, load_forge_config_full};
 
-/// Main entry point for the ForgeLSP server.
+/// Main entry point for the `ForgeLSP` server.
 #[tokio::main]
 async fn main() {
     // Initialize workspace folders (will be updated during LSP initialize if client provides them)
@@ -46,7 +46,6 @@ async fn main() {
     // Wrapped in Arc for shared ownership across async tasks
     let manager = Arc::new(
         MetadataManager::new("./.cache", fetch_urls)
-            .await
             .expect("Failed to initialize metadata manager: check cache directory permissions"),
     );
 

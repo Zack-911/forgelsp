@@ -534,18 +534,16 @@ impl<'a> ForgeScriptParser<'a> {
                             end: last_idx,
                         });
                         continue;
-                    } else {
-                        if !ignore_next_line {
-                            diagnostics.push(Diagnostic {
-                                message: "Unclosed '{' for JavaScript expression `${...}`"
-                                    .to_string(),
-                                start,
-                                end: self.code.len(),
-                            });
-                        }
-                        last_idx = self.code.len();
-                        continue;
                     }
+                    if !ignore_next_line {
+                        diagnostics.push(Diagnostic {
+                            message: "Unclosed '{' for JavaScript expression `${...}`".to_string(),
+                            start,
+                            end: self.code.len(),
+                        });
+                    }
+                    last_idx = self.code.len();
+                    continue;
                 }
 
                 let mut silent = false;
@@ -640,40 +638,37 @@ impl<'a> ForgeScriptParser<'a> {
                                 end: last_idx,
                             });
                             continue;
-                        } else {
-                            if !ignore_next_line {
-                                diagnostics.push(Diagnostic {
-                                    message: format!(
-                                        "Unclosed '[' for escape function `${full_name}`",
-                                    ),
-                                    start,
-                                    end: self.code.len(),
-                                });
-                            }
-                            last_idx = self.code.len();
-                            continue;
                         }
-                    } else {
-                        // $esc or $escape without brackets - treat as unknown function
                         if !ignore_next_line {
                             diagnostics.push(Diagnostic {
                                 message: format!(
-                                    "${} expects brackets `[...]` containing content to escape",
-                                    full_name
+                                    "Unclosed '[' for escape function `${full_name}`",
                                 ),
                                 start,
-                                end: full_name_end,
+                                end: self.code.len(),
                             });
                         }
-                        tokens.push(Token {
-                            kind: TokenKind::Unknown,
-                            text: self.code[start..full_name_end].to_string(),
+                        last_idx = self.code.len();
+                        continue;
+                    }
+                    // $esc or $escape without brackets - treat as unknown function
+                    if !ignore_next_line {
+                        diagnostics.push(Diagnostic {
+                            message: format!(
+                                "${full_name} expects brackets `[...]` containing content to escape",
+                            ),
                             start,
                             end: full_name_end,
                         });
-                        last_idx = full_name_end;
-                        continue;
                     }
+                    tokens.push(Token {
+                        kind: TokenKind::Unknown,
+                        text: self.code[start..full_name_end].to_string(),
+                        start,
+                        end: full_name_end,
+                    });
+                    last_idx = full_name_end;
+                    continue;
                 }
 
                 // Determine the actual function name to use
@@ -801,7 +796,7 @@ impl<'a> ForgeScriptParser<'a> {
                         if meta.brackets.is_some() {
                             match parse_nested_args(
                                 inner,
-                                self.manager.clone(),
+                                &self.manager,
                                 &mut diagnostics,
                                 args_start_offset,
                             ) {
@@ -827,7 +822,7 @@ impl<'a> ForgeScriptParser<'a> {
                                             &name,
                                             &args_vec,
                                             meta_args,
-                                            self.manager.clone(),
+                                            &self.manager,
                                             &mut diagnostics,
                                             start, // Use function start for now as we don't have better arg offsets
                                             self.code,
@@ -1114,7 +1109,7 @@ fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
 
 fn parse_nested_args(
     input: &str,
-    manager: Arc<MetadataManager>,
+    manager: &Arc<MetadataManager>,
     diagnostics: &mut Vec<Diagnostic>,
     base_offset: usize,
 ) -> Result<Vec<SmallVec<[ParsedArg; 8]>>, nom::Err<()>> {
@@ -1201,11 +1196,11 @@ fn parse_nested_args(
 
                     args.push(parse_single_arg(
                         trimmed,
-                        manager.clone(),
+                        manager,
                         first_char_escaped,
                         diagnostics,
                         base_offset + arg_start_offset + leading_whitespace_len,
-                    )?);
+                    ));
                 } else {
                     args.push(smallvec![ParsedArg::Literal {
                         text: String::new()
@@ -1242,11 +1237,11 @@ fn parse_nested_args(
         if !trimmed.is_empty() {
             args.push(parse_single_arg(
                 trimmed,
-                manager.clone(),
+                manager,
                 first_char_escaped,
                 diagnostics,
                 base_offset + arg_start_offset + leading_whitespace_len,
-            )?);
+            ));
         } else {
             args.push(smallvec![ParsedArg::Literal {
                 text: String::new()
@@ -1259,14 +1254,14 @@ fn parse_nested_args(
 
 fn parse_single_arg(
     input: &str,
-    manager: Arc<MetadataManager>,
+    manager: &Arc<MetadataManager>,
     force_literal: bool,
     diagnostics: &mut Vec<Diagnostic>,
     base_offset: usize,
-) -> Result<SmallVec<[ParsedArg; 8]>, nom::Err<()>> {
+) -> SmallVec<[ParsedArg; 8]> {
     if !force_literal && input.starts_with('$') {
         // Use new_internal to parse directly without code block extraction
-        let parser = ForgeScriptParser::new_internal(manager.clone(), input);
+        let parser = ForgeScriptParser::new_internal((*manager).clone(), input);
         let res = parser.parse_internal();
 
         // Propagate diagnostics from the inner parser
@@ -1277,18 +1272,18 @@ fn parse_single_arg(
         }
 
         if let Some(f) = res.functions.first() {
-            Ok(smallvec![ParsedArg::Function {
+            smallvec![ParsedArg::Function {
                 func: Box::new(f.clone())
-            }])
+            }]
         } else {
-            Ok(smallvec![ParsedArg::Literal {
+            smallvec![ParsedArg::Literal {
                 text: input.to_string()
-            }])
+            }]
         }
     } else {
-        Ok(smallvec![ParsedArg::Literal {
+        smallvec![ParsedArg::Literal {
             text: input.to_string()
-        }])
+        }]
     }
 }
 
@@ -1309,13 +1304,13 @@ fn validate_arg_count(
     }
     if total < min {
         diagnostics.push(Diagnostic {
-            message: format!("${} expects at least {} args, got {}", name, min, total),
+            message: format!("${name} expects at least {min} args, got {total}"),
             start: span.0,
             end: span.1,
         });
     } else if !has_rest && total > max {
         diagnostics.push(Diagnostic {
-            message: format!("${} expects at most {} args, got {}", name, max, total),
+            message: format!("${name} expects at most {max} args, got {total}"),
             start: span.0,
             end: span.1,
         });
@@ -1326,7 +1321,7 @@ fn validate_arg_enums(
     name: &str,
     parsed_args: &[SmallVec<[ParsedArg; 8]>],
     meta_args: &[crate::metadata::Arg],
-    manager: Arc<MetadataManager>,
+    manager: &Arc<MetadataManager>,
     diagnostics: &mut Vec<Diagnostic>,
     base_offset: usize,
     _source: &str,
