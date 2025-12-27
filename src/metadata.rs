@@ -667,9 +667,9 @@ impl MetadataManager {
 
         let obj_re =
             regex::Regex::new(r"(?s)\{(.*?)\}").expect("MetadataManager: regex compile failed");
-        let required_re = regex::Regex::new(r"required:\s*(true|false)")
+        let required_re = regex::Regex::new(r"(?i)required:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
-        let rest_re = regex::Regex::new(r"rest:\s*(true|false)")
+        let rest_re = regex::Regex::new(r"(?i)rest:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
         let type_re = regex::Regex::new(r"type:\s*([^,}\n\s]+)")
             .expect("MetadataManager: regex compile failed");
@@ -711,7 +711,7 @@ impl MetadataManager {
                         if let Some(r_cap) = required_re.captures(obj_body) {
                             obj_map.insert(
                                 "required".to_string(),
-                                JsonValue::Bool(&r_cap[1] == "true"),
+                                JsonValue::Bool(r_cap[1].eq_ignore_ascii_case("true")),
                             );
                         }
 
@@ -719,7 +719,7 @@ impl MetadataManager {
                         if let Some(rest_cap) = rest_re.captures(obj_body) {
                             obj_map.insert(
                                 "rest".to_string(),
-                                JsonValue::Bool(&rest_cap[1] == "true"),
+                                JsonValue::Bool(rest_cap[1].eq_ignore_ascii_case("true")),
                             );
                         }
 
