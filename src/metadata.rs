@@ -13,12 +13,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::future;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use tower_lsp::Client as LspClient;
+use tower_lsp::lsp_types::{MessageActionItem, MessageType};
 
 use crate::utils::Event;
 
@@ -44,7 +45,8 @@ pub struct Function {
     /// Expected output types or values.
     pub output: Option<Vec<String>>,
     /// Category the function belongs to.
-    pub category: String,
+    #[serde(default)]
+    pub category: Option<String>,
     /// List of aliases for this function.
     pub aliases: Option<Vec<String>>,
     /// Whether the function is experimental.
@@ -106,8 +108,10 @@ pub struct Arg {
     /// The name of the argument.
     pub name: String,
     /// Description of the argument's purpose.
+    #[serde(default)]
     pub description: String,
     /// Whether this is a rest argument (variadic).
+    #[serde(default)]
     pub rest: bool,
     /// Whether the argument is required.
     pub required: Option<bool>,
@@ -136,6 +140,7 @@ pub struct Arg {
 pub struct Fetcher {
     http: Client,
     cache_dir: PathBuf,
+    client: Option<LspClient>,
 }
 
 impl Fetcher {
@@ -143,7 +148,8 @@ impl Fetcher {
     ///
     /// # Arguments
     /// * `cache_dir` - Path to the directory where cached responses will be stored.
-    pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+    /// * `client` - Optional LSP client for error reporting.
+    pub fn new(cache_dir: impl Into<PathBuf>, client: Option<LspClient>) -> Self {
         let dir = cache_dir.into();
         if !dir.exists() {
             fs::create_dir_all(&dir).expect("Failed to create cache directory");
@@ -153,13 +159,54 @@ impl Fetcher {
                 .build()
                 .expect("Failed to build HTTP client"),
             cache_dir: dir,
+            client,
         }
     }
 
-    /// Returns the cache path for a given URL.
+    /// Returns the cache path for a given URL using the scheme: <RepoName><Type><Branch>.json
     fn cache_path(&self, url: &str) -> PathBuf {
-        let safe = URL_SAFE_NO_PAD.encode(url);
-        self.cache_dir.join(format!("{safe}.json"))
+        let parts: Vec<&str> = url.split('/').collect();
+
+        // New scheme: <RepoName><Type><Branch>.json
+        // URL format: https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path/to/file.json>
+        if url.contains("raw.githubusercontent.com") {
+            let repo = parts.get(4).unwrap_or(&"Unknown");
+            let branch = parts.get(5).unwrap_or(&"main");
+            let file_name = parts.last().unwrap_or(&"unknown.json");
+            let type_name = if file_name.contains("functions") {
+                "Functions"
+            } else if file_name.contains("enums") {
+                "Enums"
+            } else if file_name.contains("events") {
+                "Events"
+            } else {
+                "Other"
+            };
+
+            // Capitalize repo and branch for better file names
+            let repo_cap = repo
+                .chars()
+                .next()
+                .unwrap_or_default()
+                .to_uppercase()
+                .to_string()
+                + &repo.chars().skip(1).collect::<String>();
+            let branch_cap = branch
+                .chars()
+                .next()
+                .unwrap_or_default()
+                .to_uppercase()
+                .to_string()
+                + &branch.chars().skip(1).collect::<String>();
+
+            self.cache_dir
+                .join(format!("{repo_cap}{type_name}{branch_cap}.json"))
+        } else {
+            // Fallback for non-GitHub URLs
+            use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+            let safe = URL_SAFE_NO_PAD.encode(url);
+            self.cache_dir.join(format!("{safe}.json"))
+        }
     }
 
     /// Fetches data from a URL or returns cached data if available.
@@ -169,26 +216,122 @@ impl Fetcher {
     ///
     /// # Returns
     /// The deserialized data of type `T`.
-    pub async fn fetch_or_cache<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
+    pub async fn fetch_or_cache<T: DeserializeOwned + Serialize>(&self, url: &str, mandatory: bool) -> Result<T> {
         let path = self.cache_path(url);
 
-        match self.http.get(url).send().await {
-            Ok(resp) => {
-                let body = resp.text().await?;
-                fs::write(&path, &body)?;
-                let parsed: T = serde_json::from_str(&body)?;
-                Ok(parsed)
-            }
-            Err(_err) => {
-                if path.exists() {
-                    let data = fs::read_to_string(&path)?;
-                    let parsed: T = serde_json::from_str(&data)?;
-                    Ok(parsed)
-                } else {
-                    Err(anyhow!("No cache found for {url}"))
+        loop {
+            match self.http.get(url).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        if !mandatory {
+                            return Err(anyhow!("Optional file returned status {}: {}", resp.status(), url));
+                        }
+                    }
+
+                    let body = resp.text().await?;
+
+                    // Validate JSON content
+                    match serde_json::from_str::<JsonValue>(&body) {
+                        Ok(json) => {
+                            if json.is_array() || json.is_object() {
+                                // Try to deserialize into T
+                                match serde_json::from_value::<T>(json) {
+                                    Ok(parsed) => {
+                                        fs::write(&path, &body)?;
+                                        return Ok(parsed);
+                                    }
+                                    Err(e) => {
+                                        // Network fetch was okay, but parsing into T failed.
+                                        // Fallback to cache if available.
+                                        if path.exists() {
+                                            if let Ok(data) = fs::read_to_string(&path) {
+                                                if let Ok(parsed) = serde_json::from_str::<T>(&data) {
+                                                    return Ok(parsed);
+                                                }
+                                            }
+                                        }
+
+                                        if mandatory && self.client.is_some() {
+                                            let retry = self.show_error_report(url, &format!("Data model mismatch: {e}")).await;
+                                            if retry {
+                                                continue;
+                                            }
+                                        }
+                                        return Err(anyhow!("Failed to parse JSON from {url} into data model: {e}"));
+                                    }
+                                }
+                            } else {
+                                // Probably HTML or something else
+                                if path.exists() {
+                                    if let Ok(data) = fs::read_to_string(&path) {
+                                        if let Ok(parsed) = serde_json::from_str::<T>(&data) {
+                                            return Ok(parsed);
+                                        }
+                                    }
+                                }
+
+                                if mandatory && self.client.is_some() {
+                                    let retry = self.show_error_report(url, "Received invalid JSON (likely HTML or plain text)").await;
+                                    if retry {
+                                        continue;
+                                    }
+                                }
+                                return Err(anyhow!("Received invalid JSON from {url}"));
+                            }
+                        }
+                        Err(e) => {
+                            if path.exists() {
+                                if let Ok(data) = fs::read_to_string(&path) {
+                                    if let Ok(parsed) = serde_json::from_str::<T>(&data) {
+                                        return Ok(parsed);
+                                    }
+                                }
+                            }
+
+                            if mandatory && self.client.is_some() {
+                                let retry = self.show_error_report(url, &format!("JSON syntax error: {e}")).await;
+                                if retry {
+                                    continue;
+                                }
+                            }
+                            return Err(anyhow!("Failed to parse JSON from {url}: {e}"));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if path.exists() {
+                        let data = fs::read_to_string(&path)?;
+                        if let Ok(parsed) = serde_json::from_str::<T>(&data) {
+                            return Ok(parsed);
+                        }
+                    }
+
+                    if mandatory && self.client.is_some() {
+                        let retry = self.show_error_report(url, &format!("Network error: {err}")).await;
+                        if retry {
+                            continue;
+                        }
+                    }
+
+                    return Err(anyhow!("Failed to fetch {url}: {err}"));
                 }
             }
         }
+    }
+
+    async fn show_error_report(&self, url: &str, reason: &str) -> bool {
+        if let Some(client) = &self.client {
+            let message = format!("Failed to fetch ForgeScript metadata from {url}: {reason}");
+            let actions = vec![MessageActionItem {
+                title: "Retry".to_string(),
+                properties: HashMap::new(),
+            }];
+
+            if let Ok(Some(item)) = client.show_message_request(MessageType::ERROR, message, Some(actions)).await {
+                return item.title == "Retry";
+            }
+        }
+        false
     }
 
     /// Fetches function metadata from multiple URLs concurrently.
@@ -202,7 +345,7 @@ impl Fetcher {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
             let this = self.clone();
-            async move { this.fetch_or_cache::<Vec<Function>>(&u).await }
+            async move { this.fetch_or_cache::<Vec<Function>>(&u, true).await }
         });
         let results = future::join_all(tasks).await;
 
@@ -217,10 +360,43 @@ impl Fetcher {
             }
         }
 
+        // Cleanup unused cache files
+        self.cleanup_unused_cache(urls).ok();
+
         // Silently ignore failures - we have cached data as fallback
         let _ = fail_count;
 
         Ok(out)
+    }
+
+    fn cleanup_unused_cache(&self, active_urls: &[String]) -> Result<()> {
+        if !self.cache_dir.exists() {
+            return Ok(());
+        }
+
+        let active_paths: std::collections::HashSet<PathBuf> = active_urls
+            .iter()
+            .map(|u| self.cache_path(u))
+            .collect();
+
+        // Also include enum and event URLs because they are fetched separately
+        let mut all_possible_active = active_paths.clone();
+        for url in active_urls {
+            if url.ends_with("functions.json") {
+                all_possible_active.insert(self.cache_path(&url.replace("functions.json", "enums.json")));
+                all_possible_active.insert(self.cache_path(&url.replace("functions.json", "events.json")));
+            }
+        }
+
+        for entry in fs::read_dir(&self.cache_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && !all_possible_active.contains(&path) {
+                fs::remove_file(path)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Fetches enum definitions from multiple URLs concurrently.
@@ -235,7 +411,7 @@ impl Fetcher {
             let u = u.clone();
             let this = self.clone();
             async move {
-                this.fetch_or_cache::<HashMap<String, Vec<String>>>(&u)
+                this.fetch_or_cache::<HashMap<String, Vec<String>>>(&u, false)
                     .await
             }
         });
@@ -259,7 +435,7 @@ impl Fetcher {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
             let this = self.clone();
-            async move { this.fetch_or_cache::<Vec<Event>>(&u).await }
+            async move { this.fetch_or_cache::<Vec<Event>>(&u, false).await }
         });
         let results = future::join_all(tasks).await;
 
@@ -437,8 +613,9 @@ impl MetadataManager {
     /// # Arguments
     /// * `cache_dir` - Path for caching fetched metadata.
     /// * `fetch_urls` - Initial list of metadata source URLs.
-    pub fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>) -> Result<Self> {
-        let fetcher = Fetcher::new(cache_dir);
+    /// * `client` - Optional LSP client for error reporting.
+    pub fn new(cache_dir: impl Into<PathBuf>, fetch_urls: Vec<String>, client: Option<LspClient>) -> Result<Self> {
+        let fetcher = Fetcher::new(cache_dir, client);
         let trie = Arc::new(RwLock::new(FunctionTrie::default()));
         let enums = Arc::new(RwLock::new(HashMap::new()));
         let events = Arc::new(RwLock::new(Vec::new()));
@@ -921,7 +1098,7 @@ impl MetadataManager {
                 unwrap: false,
                 args,
                 output: None,
-                category: "custom".to_string(),
+                category: Some("custom".to_string()),
                 aliases,
                 experimental: None,
                 examples: None,
@@ -987,5 +1164,52 @@ impl MetadataManager {
             .read()
             .expect("MetadataManager: trie lock poisoned");
         trie.collect_all()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_path() {
+        let fetcher = Fetcher::new("./.test_cache", None);
+        
+        // GitHub URL
+        let url1 = "https://raw.githubusercontent.com/tryforge/forgescript/dev/metadata/functions.json";
+        let path1 = fetcher.cache_path(url1);
+        assert_eq!(path1.file_name().unwrap().to_str().unwrap(), "ForgescriptFunctionsDev.json");
+
+        let url2 = "https://raw.githubusercontent.com/owner/repo/master/enums.json";
+        let path2 = fetcher.cache_path(url2);
+        assert_eq!(path2.file_name().unwrap().to_str().unwrap(), "RepoEnumsMaster.json");
+
+        // Fallback
+        let url3 = "https://example.com/data.json";
+        let path3 = fetcher.cache_path(url3);
+        assert!(path3.file_name().unwrap().to_str().unwrap().ends_with(".json"));
+        assert!(!path3.file_name().unwrap().to_str().unwrap().contains("Functions"));
+    }
+
+    #[test]
+    fn test_cleanup() {
+        let cache_dir = "./.test_cleanup_cache";
+        let fetcher = Fetcher::new(cache_dir, None);
+        
+        let url1 = "https://raw.githubusercontent.com/tryforge/forgescript/dev/metadata/functions.json";
+        let path1 = fetcher.cache_path(url1);
+        fs::write(&path1, "{}").unwrap();
+
+        let old_path = PathBuf::from(cache_dir).join("old_cache_file.json");
+        fs::write(&old_path, "{}").unwrap();
+
+        assert!(path1.exists());
+        assert!(old_path.exists());
+
+        fetcher.cleanup_unused_cache(&[url1.to_string()] as &[String]).unwrap();
+
+        assert!(path1.exists());
+        assert!(!old_path.exists());
+
+        fs::remove_dir_all(cache_dir).unwrap();
     }
 }

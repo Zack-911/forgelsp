@@ -45,7 +45,7 @@ async fn main() {
     // Initialize metadata manager with cache directory and fetch URLs
     // Wrapped in Arc for shared ownership across async tasks
     let manager = Arc::new(
-        MetadataManager::new("./.cache", fetch_urls)
+        MetadataManager::new("./.cache", fetch_urls, None)
             .expect("Failed to initialize metadata manager: check cache directory permissions"),
     );
 

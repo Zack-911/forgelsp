@@ -244,7 +244,7 @@ impl LanguageServer for ForgeScriptServer {
 
             if let Some(config) = load_forge_config_full(&paths) {
                 let urls = config.urls.clone();
-                let manager = MetadataManager::new("./.cache", urls)
+                let manager = MetadataManager::new("./.cache", urls, Some(self.client.clone()))
                     .expect("Failed to initialize metadata manager");
                 manager
                     .load_all()
@@ -414,7 +414,7 @@ impl LanguageServer for ForgeScriptServer {
                         CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::FUNCTION),
-                            detail: Some(f.category.clone()),
+                            detail: Some(f.category.clone().unwrap_or_else(|| "Function".to_string())),
                             documentation: Some(Documentation::String(f.description.clone())),
                             insert_text: Some(name),
                             // Important: filter WITHOUT modifier

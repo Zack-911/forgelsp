@@ -452,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn test_function_modifiers() {
         let manager =
-            MetadataManager::new("./.cache_test", vec![]).expect("Failed to create manager");
+            MetadataManager::new("./.cache_test", vec![], None).expect("Failed to create manager");
 
         // Add a test function
         manager
@@ -495,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bracket_and_prefix_matching() {
-        let manager = MetadataManager::new("./.cache_test_semantic", vec![])
+        let manager = MetadataManager::new("./.cache_test_semantic", vec![], None)
             .expect("Failed to create manager");
 
         // Add test functions
@@ -560,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_utf8_boundaries() {
-        let manager = MetadataManager::new("./.cache_test_semantic_utf8", vec![])
+        let manager = MetadataManager::new("./.cache_test_semantic_utf8", vec![], None)
             .expect("Failed to create manager");
         let manager = Arc::new(manager);
 
