@@ -196,7 +196,7 @@ strip = true       # Remove debug symbols
 
 ## 🔗 Related Projects
 
-- **[ForgeLSP VS Code Extension](../forgevsc)** - The VS Code client for this LSP
+- **[ForgeLSP VS Code Extension](https://github.com/zack-911/forgevsc)** - The VS Code client for this LSP
 - **[ForgeScript](https://github.com/tryforge/forgescript)** - The ForgeScript language
 
 ---
