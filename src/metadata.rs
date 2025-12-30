@@ -660,13 +660,9 @@ impl MetadataManager {
             .expect("MetadataManager: regex compile failed");
         let brackets_re = regex::Regex::new(r"brackets:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
-        let params_re = regex::Regex::new(r"(?s)params:\s*\[(.*?)\]")
-            .expect("MetadataManager: regex compile failed");
         let p_name_re = regex::Regex::new(r#"name:\s*['"]([^'"]+)['"]"#)
             .expect("MetadataManager: regex compile failed");
 
-        let obj_re =
-            regex::Regex::new(r"(?s)\{(.*?)\}").expect("MetadataManager: regex compile failed");
         let required_re = regex::Regex::new(r"(?i)required:\s*(true|false)")
             .expect("MetadataManager: regex compile failed");
         let rest_re = regex::Regex::new(r"(?i)rest:\s*(true|false)")
@@ -693,69 +689,93 @@ impl MetadataManager {
             let brackets = brackets_re.captures(chunk).map(|c| &c[1] == "true");
 
             let mut params = None;
-            if let Some(p_cap) = params_re.captures(chunk) {
-                let p_content = &p_cap[1];
+            // Find if there's a params range that starts within this function's chunk
+            if let Some(p_range) = params_ranges.iter().find(|r| r.start >= *end_pos && r.start < chunk_end) {
+                let p_content = &content[p_range.start + 1..p_range.end]; // Content inside [ ]
 
                 // Try to parse individual objects in the array first
                 let mut param_objects = Vec::new();
 
-                for obj_cap in obj_re.captures_iter(p_content) {
-                    let obj_body = &obj_cap[1];
-                    let mut obj_map = serde_json::Map::new();
+                // Manually find { ... } blocks with balanced braces
+                let mut search_idx = 0;
+                while let Some(start_bracket) = p_content[search_idx..].find('{') {
+                    let absolute_start = search_idx + start_bracket;
+                    let mut depth = 0;
+                    let mut absolute_end = None;
 
-                    // Extract name (required for a valid param object)
-                    if let Some(n_cap) = p_name_re.captures(obj_body) {
-                        obj_map.insert("name".to_string(), JsonValue::String(n_cap[1].to_string()));
-
-                        // Extract required
-                        if let Some(r_cap) = required_re.captures(obj_body) {
-                            obj_map.insert(
-                                "required".to_string(),
-                                JsonValue::Bool(r_cap[1].eq_ignore_ascii_case("true")),
-                            );
+                    for (i, c) in p_content[absolute_start..].char_indices() {
+                        if c == '{' {
+                            depth += 1;
+                        } else if c == '}' {
+                            depth -= 1;
+                            if depth == 0 {
+                                absolute_end = Some(absolute_start + i);
+                                break;
+                            }
                         }
+                    }
 
-                        // Extract rest
-                        if let Some(rest_cap) = rest_re.captures(obj_body) {
-                            obj_map.insert(
-                                "rest".to_string(),
-                                JsonValue::Bool(rest_cap[1].eq_ignore_ascii_case("true")),
-                            );
+                    if let Some(end_bracket) = absolute_end {
+                        let obj_body = &p_content[absolute_start + 1..end_bracket];
+                        let mut obj_map = serde_json::Map::new();
+
+                        // Extract name (required for a valid param object)
+                        if let Some(n_cap) = p_name_re.captures(obj_body) {
+                            obj_map.insert("name".to_string(), JsonValue::String(n_cap[1].to_string()));
+
+                            // Extract required
+                            if let Some(r_cap) = required_re.captures(obj_body) {
+                                obj_map.insert(
+                                    "required".to_string(),
+                                    JsonValue::Bool(r_cap[1].eq_ignore_ascii_case("true")),
+                                );
+                            }
+
+                            // Extract rest
+                            if let Some(rest_cap) = rest_re.captures(obj_body) {
+                                obj_map.insert(
+                                    "rest".to_string(),
+                                    JsonValue::Bool(rest_cap[1].eq_ignore_ascii_case("true")),
+                                );
+                            }
+
+                            // Extract type
+                            if let Some(t_cap) = type_re.captures(obj_body) {
+                                let t_val = t_cap[1].trim();
+                                let t_val_clean =
+                                    t_val.trim_matches(|c| c == '\'' || c == '\"').to_string();
+                                let t_final =
+                                    if let Some(stripped) = t_val_clean.strip_prefix("ArgType.") {
+                                        stripped.to_string()
+                                    } else {
+                                        t_val_clean
+                                    };
+                                obj_map.insert("type".to_string(), JsonValue::String(t_final));
+                            } else {
+                                // Default type if missing
+                                obj_map.insert(
+                                    "type".to_string(),
+                                    JsonValue::String("String".to_string()),
+                                );
+                            }
+
+                            // Extract description
+                            if let Some(d_cap) = desc_double_re
+                                .captures(obj_body)
+                                .or_else(|| desc_single_re.captures(obj_body))
+                                .or_else(|| desc_backtick_re.captures(obj_body))
+                            {
+                                obj_map.insert(
+                                    "description".to_string(),
+                                    JsonValue::String(d_cap[1].to_string()),
+                                );
+                            }
+
+                            param_objects.push(JsonValue::Object(obj_map));
                         }
-
-                        // Extract type
-                        if let Some(t_cap) = type_re.captures(obj_body) {
-                            let t_val = t_cap[1].trim();
-                            let t_val_clean =
-                                t_val.trim_matches(|c| c == '\'' || c == '\"').to_string();
-                            let t_final =
-                                if let Some(stripped) = t_val_clean.strip_prefix("ArgType.") {
-                                    stripped.to_string()
-                                } else {
-                                    t_val_clean
-                                };
-                            obj_map.insert("type".to_string(), JsonValue::String(t_final));
-                        } else {
-                            // Default type if missing
-                            obj_map.insert(
-                                "type".to_string(),
-                                JsonValue::String("String".to_string()),
-                            );
-                        }
-
-                        // Extract description
-                        if let Some(d_cap) = desc_double_re
-                            .captures(obj_body)
-                            .or_else(|| desc_single_re.captures(obj_body))
-                            .or_else(|| desc_backtick_re.captures(obj_body))
-                        {
-                            obj_map.insert(
-                                "description".to_string(),
-                                JsonValue::String(d_cap[1].to_string()),
-                            );
-                        }
-
-                        param_objects.push(JsonValue::Object(obj_map));
+                        search_idx = end_bracket + 1;
+                    } else {
+                        break; // Unbalanced or malformed
                     }
                 }
 
