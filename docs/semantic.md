@@ -37,6 +37,26 @@ pub fn extract_semantic_tokens_with_colors(
 3. Convert absolute tokens to relative LSP format
 4. Return semantic tokens for the entire document
 
+### `extract_highlight_ranges`
+
+Extracts highlight ranges for VS Code decorations:
+
+```rust
+pub fn extract_highlight_ranges(
+    source: &str,
+    function_colors: &[String],
+    manager: &Arc<MetadataManager>,
+) -> Vec<(usize, usize, String)>
+```
+
+**Process:**
+1. Similar to `extract_tokens_from_code`, scans code blocks
+2. Identifies function ranges
+3. Assigns colors from `function_colors` in a round-robin fashion
+4. Returns absolute character offsets and hex color strings
+
+**Note:** This feature uses editor decorations, not semantic tokens. Colors are applied at runtime and override theme colors.
+
 ## Code Block Extraction
 
 Similar to parser, extracts ForgeScript from backtick-delimited blocks:

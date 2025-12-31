@@ -99,6 +99,7 @@ Complete configuration file structure:
 pub struct ForgeConfig {
     pub urls: Vec<String>,                          // Metadata source URLs
     pub multiple_function_colors: Option<bool>,     // Enable multi-color highlighting
+    pub function_colors: Option<Vec<String>>,       // Custom hex colors for highlighting
     pub custom_functions: Option<Vec<CustomFunction>>, // User-defined functions
     pub custom_functions_path: Option<String>,      // Path to folder with .js/.ts functions
 }

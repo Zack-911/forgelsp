@@ -127,8 +127,70 @@ pub fn extract_semantic_tokens_with_colors(
         }
     }
 
-    // Convert to relative tokens
+// Convert to relative tokens
     to_relative_tokens(&tokens, source)
+}
+
+/// Extracts highlight ranges for VS Code decorations.
+///
+/// Returns a list of (start_offset, end_offset, color_string)
+pub fn extract_highlight_ranges(
+    source: &str,
+    function_colors: &[String],
+    manager: &Arc<MetadataManager>,
+) -> Vec<(usize, usize, String)> {
+    let mut highlights = Vec::new();
+    if function_colors.is_empty() {
+        return highlights;
+    }
+
+    let mut color_index = 0usize;
+
+    for cap in CODE_BLOCK_RE.captures_iter(source) {
+        if let Some(match_group) = cap.get(1) {
+            let content_start = match_group.start();
+            let code = match_group.as_str();
+            let bytes = code.as_bytes();
+
+            let char_positions: Vec<(usize, char)> = code.char_indices().collect();
+            let mut idx = 0;
+
+            while idx < char_positions.len() {
+                let (i, c) = char_positions[idx];
+
+                if c == '$' && !is_char_escaped(bytes, i) {
+                    // Skip comments and escape functions as they are handled by semantic tokens
+                    if try_extract_comment(code, idx, &char_positions).is_some() {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if try_extract_escape(code, idx, &char_positions).is_some() {
+                        idx += 1;
+                        continue;
+                    }
+
+                    if let Some((best_match_len, best_match_char_count)) =
+                        try_extract_metadata_function(code, idx, &char_positions, manager)
+                    {
+                        let color = &function_colors[color_index % function_colors.len()];
+                        color_index += 1;
+
+                        highlights.push((
+                            i + content_start,
+                            i + best_match_len + content_start,
+                            color.clone(),
+                        ));
+                        idx += best_match_char_count;
+                        continue;
+                    }
+                }
+                idx += 1;
+            }
+        }
+    }
+
+    highlights
 }
 
 /// Internal helper to extract tokens from a specific code block.
@@ -425,7 +487,7 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
 /// Converts a byte offset within a string to an LSP Position (line and character).
 ///
 /// Handles multi-byte characters and line endings.
-fn offset_to_position(text: &str, offset: usize) -> Position {
+pub fn offset_to_position(text: &str, offset: usize) -> Position {
     let mut line = 0u32;
     let mut col = 0u32;
 

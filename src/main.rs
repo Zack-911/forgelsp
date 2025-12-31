@@ -72,14 +72,22 @@ async fn main() {
     let config_wrapped = Arc::new(RwLock::new(full_config.clone()));
 
     // Initialize LSP service with all required state
-    let (service, socket) = LspService::new(|client| ForgeScriptServer {
-        client,                                                              // LSP client connection
-        manager: manager_wrapped.clone(), // Function metadata (reloadable)
-        documents: Arc::new(RwLock::new(HashMap::new())), // Document content cache
-        parsed_cache: Arc::new(RwLock::new(HashMap::new())), // Parse result cache
-        workspace_folders: Arc::new(RwLock::new(workspace_folders.clone())), // Active workspaces
-        multiple_function_colors: Arc::new(RwLock::new(true)), // Semantic highlighting config
-        config: config_wrapped
+    let (service, socket) = LspService::new(|client| {
+        let colors = full_config
+            .as_ref()
+            .and_then(|c| c.function_colors.clone())
+            .unwrap_or_default();
+
+        ForgeScriptServer {
+            client,                                                              // LSP client connection
+            manager: manager_wrapped.clone(), // Function metadata (reloadable)
+            documents: Arc::new(RwLock::new(HashMap::new())), // Document content cache
+            parsed_cache: Arc::new(RwLock::new(HashMap::new())), // Parse result cache
+            workspace_folders: Arc::new(RwLock::new(workspace_folders.clone())), // Active workspaces
+            multiple_function_colors: Arc::new(RwLock::new(true)), // Semantic highlighting config
+            function_colors: Arc::new(RwLock::new(colors)),
+            config: config_wrapped,
+        }
     });
 
     // Start the LSP server on stdin/stdout

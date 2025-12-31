@@ -10,6 +10,7 @@
 //! - Semantic token highlighting
 //! - Real-time diagnostics
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -34,6 +35,18 @@ static SIGNATURE_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").expect("Server: regex compile failed")
 });
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HighlightRange {
+    pub range: Range,
+    pub color: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ForgeHighlightsParams {
+    pub uri: Url,
+    pub highlights: Vec<HighlightRange>,
+}
+
 /// `ForgeScript` Language Server
 ///
 /// Maintains shared state for document content, parse results, and function metadata.
@@ -47,6 +60,7 @@ pub struct ForgeScriptServer {
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>,
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
     pub multiple_function_colors: Arc<RwLock<bool>>,
+    pub function_colors: Arc<RwLock<Vec<String>>>,
     pub config: Arc<RwLock<Option<ForgeConfig>>>,
 }
 
@@ -69,6 +83,7 @@ impl ForgeScriptServer {
             .insert(uri.clone(), parsed.clone());
 
         publish_diagnostics(self, &uri, &text, &parsed.diagnostics).await;
+        self.send_highlights(uri, &text).await;
 
         let diag_count = parsed.diagnostics.len();
         if diag_count > 0 {
@@ -110,6 +125,51 @@ impl ForgeScriptServer {
         // Fallback to clamping to line length if out of bounds
         line.len()
     }
+
+    /// Sends dynamic highlights notification to the client.
+    pub async fn send_highlights(&self, uri: Url, text: &str) {
+        let colors = self
+            .function_colors
+            .read()
+            .expect("Server: function_colors lock poisoned")
+            .clone();
+
+        if colors.is_empty() {
+            return;
+        }
+
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
+
+        let ranges = crate::semantic::extract_highlight_ranges(text, &colors, &mgr);
+        let highlights = ranges
+            .into_iter()
+            .map(|(start, end, color)| {
+                let start_pos = crate::semantic::offset_to_position(text, start);
+                let end_pos = crate::semantic::offset_to_position(text, end);
+                HighlightRange {
+                    range: Range::new(start_pos, end_pos),
+                    color,
+                }
+            })
+            .collect();
+
+        self.client
+            .send_notification::<CustomNotification>(ForgeHighlightsParams {
+                uri,
+                highlights,
+            })
+            .await;
+    }
+}
+
+struct CustomNotification;
+impl tower_lsp::lsp_types::notification::Notification for CustomNotification {
+    type Params = ForgeHighlightsParams;
+    const METHOD: &'static str = "forge/highlights";
 }
 
 /// Helper to load custom functions from folders specified in the config.
