@@ -311,6 +311,39 @@ pub async fn handle_hover(
             }
         }
 
+        // Add Links (GitHub and Documentation)
+        let mut links = Vec::new();
+
+        // GitHub Link
+        if let Some(url) = &func_ref.source_url {
+            if url.contains("githubusercontent.com") {
+                let parts: Vec<&str> = url.split('/').collect();
+                if parts.len() >= 5 {
+                    let owner = parts[3];
+                    let repo = parts[4];
+                    links.push(format!("[GitHub](https://github.com/{owner}/{repo})"));
+                }
+            }
+        }
+
+        // Documentation Link
+        if let Some(extension) = &func_ref.extension {
+            let base_url = "https://docs.botforge.org";
+            // Link format: {base_url}/function/{func_name}?p={extension}
+            links.push(format!(
+                "[Documentation]({base_url}/function/{func_name}?p={extension})",
+                base_url = base_url,
+                func_name = func_name,
+                extension = extension
+            ));
+        }
+
+        if !links.is_empty() {
+            md.push_str("\n---\n");
+            md.push_str(&links.join(" | "));
+            md.push('\n');
+        }
+
         spawn_log(
             server.client.clone(),
             MessageType::LOG,

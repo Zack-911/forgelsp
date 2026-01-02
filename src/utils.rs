@@ -77,6 +77,9 @@ pub struct ForgeConfig {
     #[serde(default)]
     pub function_colors: Option<Vec<String>>,
     #[serde(default)]
+    pub consistent_function_colors: Option<bool>,
+
+    #[serde(default)]
     pub custom_functions: Option<Vec<CustomFunction>>,
     #[serde(default)]
     pub custom_functions_path: Option<String>,

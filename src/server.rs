@@ -60,6 +60,7 @@ pub struct ForgeScriptServer {
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>,
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,
     pub multiple_function_colors: Arc<RwLock<bool>>,
+    pub consistent_function_colors: Arc<RwLock<bool>>,
     pub function_colors: Arc<RwLock<Vec<String>>>,
     pub config: Arc<RwLock<Option<ForgeConfig>>>,
 }
@@ -144,7 +145,12 @@ impl ForgeScriptServer {
             .expect("Server: manager lock poisoned")
             .clone();
 
-        let ranges = crate::semantic::extract_highlight_ranges(text, &colors, &mgr);
+        let consistent_colors = *self
+            .consistent_function_colors
+            .read()
+            .expect("Server: consistent_function_colors lock poisoned");
+
+        let ranges = crate::semantic::extract_highlight_ranges(text, &colors, consistent_colors, &mgr);
         let highlights = ranges
             .into_iter()
             .map(|(start, end, color)| {
@@ -332,6 +338,15 @@ impl LanguageServer for ForgeScriptServer {
                         .write()
                         .expect("Server: multiple_function_colors lock poisoned") = use_colors;
                 }
+
+                if let Some(consistent) = config.consistent_function_colors {
+                    *self
+                        .consistent_function_colors
+                        .write()
+                        .expect("Server: consistent_function_colors lock poisoned") = consistent;
+                }
+
+
             }
         }
 
@@ -471,13 +486,66 @@ impl LanguageServer for ForgeScriptServer {
                             base.clone()
                         };
 
+                        let mut md = String::new();
+                        
+                        // Code block with signature
+                        md.push_str("```forgescript\n");
+                        md.push_str(&f.signature_label());
+                        md.push_str("\n```\n\n");
+
+                        if !f.description.is_empty() {
+                            md.push_str(&f.description);
+                            md.push_str("\n\n");
+                        }
+
+                        if let Some(examples) = &f.examples {
+                            if !examples.is_empty() {
+                                md.push_str("**Examples:**\n");
+                                for ex in examples.iter().take(2) {
+                                    md.push_str("\n```forgescript\n");
+                                    md.push_str(ex);
+                                    md.push_str("\n```\n");
+                                }
+                            }
+                        }
+
+                        // Links
+                        let mut links = Vec::new();
+                        if let Some(url) = &f.source_url {
+                            if url.contains("githubusercontent.com") {
+                                let parts: Vec<&str> = url.split('/').collect();
+                                if parts.len() >= 5 {
+                                    let owner = parts[3];
+                                    let repo = parts[4];
+                                    links.push(format!("[GitHub](https://github.com/{owner}/{repo})"));
+                                }
+                            }
+                        }
+
+                        if let Some(extension) = &f.extension {
+                            let base_url = "https://docs.botforge.org";
+                            links.push(format!(
+                                "[Documentation]({base_url}/function/{func_name}?p={extension})",
+                                base_url = base_url,
+                                func_name = f.name,
+                                extension = extension
+                            ));
+                        }
+
+                        if !links.is_empty() {
+                            md.push_str("\n---\n");
+                            md.push_str(&links.join(" | "));
+                        }
+
                         CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::FUNCTION),
-                            detail: Some(f.category.clone().unwrap_or_else(|| "Function".to_string())),
-                            documentation: Some(Documentation::String(f.description.clone())),
+                            detail: Some(f.extension.clone().unwrap_or_else(|| f.category.clone().unwrap_or_else(|| "Function".to_string()))),
+                            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: md,
+                            })),
                             insert_text: Some(name),
-                            // Important: filter WITHOUT modifier
                             filter_text: Some(base),
                             ..Default::default()
                         }

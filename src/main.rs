@@ -78,6 +78,11 @@ async fn main() {
             .and_then(|c| c.function_colors.clone())
             .unwrap_or_default();
 
+        let consistent = full_config
+            .as_ref()
+            .and_then(|c| c.consistent_function_colors)
+            .unwrap_or(false);
+
         ForgeScriptServer {
             client,                                                              // LSP client connection
             manager: manager_wrapped.clone(), // Function metadata (reloadable)
@@ -85,6 +90,7 @@ async fn main() {
             parsed_cache: Arc::new(RwLock::new(HashMap::new())), // Parse result cache
             workspace_folders: Arc::new(RwLock::new(workspace_folders.clone())), // Active workspaces
             multiple_function_colors: Arc::new(RwLock::new(true)), // Semantic highlighting config
+            consistent_function_colors: Arc::new(RwLock::new(consistent)),
             function_colors: Arc::new(RwLock::new(colors)),
             config: config_wrapped,
         }

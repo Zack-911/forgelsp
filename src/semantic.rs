@@ -137,6 +137,7 @@ pub fn extract_semantic_tokens_with_colors(
 pub fn extract_highlight_ranges(
     source: &str,
     function_colors: &[String],
+    consistent_colors: bool,
     manager: &Arc<MetadataManager>,
 ) -> Vec<(usize, usize, String)> {
     let mut highlights = Vec::new();
@@ -145,6 +146,7 @@ pub fn extract_highlight_ranges(
     }
 
     let mut color_index = 0usize;
+    let mut function_to_color = std::collections::HashMap::new();
 
     for cap in CODE_BLOCK_RE.captures_iter(source) {
         if let Some(match_group) = cap.get(1) {
@@ -173,13 +175,27 @@ pub fn extract_highlight_ranges(
                     if let Some((best_match_len, best_match_char_count)) =
                         try_extract_metadata_function(code, idx, &char_positions, manager)
                     {
-                        let color = &function_colors[color_index % function_colors.len()];
-                        color_index += 1;
+                        let func_name = &code[i..i + best_match_len];
+                        let color = if consistent_colors {
+                            function_to_color
+                                .entry(func_name.to_string())
+                                .or_insert_with(|| {
+                                    let c = function_colors[color_index % function_colors.len()]
+                                        .clone();
+                                    color_index += 1;
+                                    c
+                                })
+                                .clone()
+                        } else {
+                            let c = function_colors[color_index % function_colors.len()].clone();
+                            color_index += 1;
+                            c
+                        };
 
                         highlights.push((
                             i + content_start,
                             i + best_match_len + content_start,
-                            color.clone(),
+                            color,
                         ));
                         idx += best_match_char_count;
                         continue;

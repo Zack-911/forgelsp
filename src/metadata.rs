@@ -55,6 +55,12 @@ pub struct Function {
     pub examples: Option<Vec<String>>,
     /// Whether the function is deprecated.
     pub deprecated: Option<bool>,
+    /// The extension this function belongs to.
+    #[serde(skip)]
+    pub extension: Option<String>,
+    /// The source URL where this function was loaded from.
+    #[serde(skip)]
+    pub source_url: Option<String>,
 }
 
 impl Function {
@@ -340,23 +346,26 @@ impl Fetcher {
     /// * `urls` - List of URLs to fetch functions from.
     ///
     /// # Returns
-    /// A vector of all successfully fetched functions.
-    pub async fn fetch_all(&self, urls: &[String]) -> Result<Vec<Function>> {
+    /// A map of URL to successfully fetched functions.
+    pub async fn fetch_all(&self, urls: &[String]) -> Result<std::collections::HashMap<String, Vec<Function>>> {
         let tasks = urls.iter().map(|u| {
             let u = u.clone();
             let this = self.clone();
-            async move { this.fetch_or_cache::<Vec<Function>>(&u, true).await }
+            async move { (u.clone(), this.fetch_or_cache::<Vec<Function>>(&u, true).await) }
         });
         let results = future::join_all(tasks).await;
 
-        let mut out = Vec::new();
+        let mut out = std::collections::HashMap::new();
         let mut fail_count = 0;
 
-        for r in results {
-            if let Ok(funcs) = r {
-                out.extend(funcs);
-            } else {
-                fail_count += 1;
+        for (url, r) in results {
+            match r {
+                Ok(funcs) => {
+                    out.insert(url, funcs);
+                }
+                Err(_) => {
+                    fail_count += 1;
+                }
             }
         }
 
@@ -633,25 +642,42 @@ impl MetadataManager {
 
     /// Loads all metadata from the configured URLs.
     pub async fn load_all(&self) -> Result<()> {
-        let all_funcs = self.fetcher.fetch_all(&self.fetch_urls).await?;
+        let all_funcs_map = self.fetcher.fetch_all(&self.fetch_urls).await?;
 
         {
             let mut trie = self
                 .trie
                 .write()
                 .expect("MetadataManager: trie lock poisoned");
-            for func in all_funcs {
-                if let Some(aliases) = &func.aliases {
-                    for alias in aliases {
-                        let mut alias_func = func.clone();
-                        alias_func.name = alias.clone();
-                        let arc_alias_func = Arc::new(alias_func);
-                        trie.insert(alias, arc_alias_func);
-                    }
+
+            for (url, mut funcs) in all_funcs_map {
+                // Determine extension name from URL
+                // github:tryforge/ForgeDB -> ForgeDB
+                // https://raw.githubusercontent.com/zack-911/forgelsp/master/metadata/functions.json -> forgelsp
+                let extension = if url.contains("githubusercontent.com") {
+                    url.split('/').nth(4).map(|s| s.to_string())
+                } else {
+                    None
+                };
+
+                for func in &mut funcs {
+                    func.extension = extension.clone();
+                    func.source_url = Some(url.clone());
                 }
 
-                let arc_func = Arc::new(func);
-                trie.insert(&arc_func.name, arc_func.clone());
+                for func in funcs {
+                    if let Some(aliases) = &func.aliases {
+                        for alias in aliases {
+                            let mut alias_func = func.clone();
+                            alias_func.name = alias.clone();
+                            let arc_alias_func = Arc::new(alias_func);
+                            trie.insert(alias, arc_alias_func);
+                        }
+                    }
+
+                    let arc_func = Arc::new(func);
+                    trie.insert(&arc_func.name, arc_func.clone());
+                }
             }
         }
 
@@ -1103,6 +1129,8 @@ impl MetadataManager {
                 experimental: None,
                 examples: None,
                 deprecated: None,
+                extension: None,
+                source_url: None,
             };
 
             // Insert the main function

@@ -110,18 +110,19 @@ The function's description from metadata is included verbatim.
 
 ### Examples
 
-Up to 2 examples are shown in code blocks:
+```
+
+### External Links
+
+If available, links to the function's source and documentation are added:
+
+- **GitHub Link**: Shows only for functions loaded from GitHub metadata.
+- **Documentation Link**: simple enough uwu :3
+- **Link Pattern**: `{base_url}/function/{func_name}?p={extension}`
 
 ```markdown
-**Examples:**
-
-```forgescript
-$functionName[example1]
-```
-
-```forgescript
-$functionName[example2]
-```
+---
+[GitHub](...) | [Documentation](...)
 ```
 
 ## Metadata Lookup

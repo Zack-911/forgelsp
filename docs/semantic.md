@@ -45,6 +45,7 @@ Extracts highlight ranges for VS Code decorations:
 pub fn extract_highlight_ranges(
     source: &str,
     function_colors: &[String],
+    consistent_colors: bool,
     manager: &Arc<MetadataManager>,
 ) -> Vec<(usize, usize, String)>
 ```
@@ -52,7 +53,9 @@ pub fn extract_highlight_ranges(
 **Process:**
 1. Similar to `extract_tokens_from_code`, scans code blocks
 2. Identifies function ranges
-3. Assigns colors from `function_colors` in a round-robin fashion
+3. **Consistent Highlighting:**
+   - If `consistent_colors` is `true`, uses a cache to ensure the same function name always gets the same color.
+   - If `false`, assigns colors in a round-robin (random-like) fashion.
 4. Returns absolute character offsets and hex color strings
 
 **Note:** This feature uses editor decorations, not semantic tokens. Colors are applied at runtime and override theme colors.

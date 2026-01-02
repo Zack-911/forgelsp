@@ -44,6 +44,8 @@ pub struct Function {
     pub experimental: Option<bool>, // Experimental flag
     pub examples: Option<Vec<String>>, // Usage examples
     pub deprecated: Option<bool>,  // Deprecation flag
+    pub extension: Option<String>, // Originating extension name
+    pub source_url: Option<String>, // Original metadata source URL
 }
 ```
 

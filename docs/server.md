@@ -14,6 +14,7 @@ pub struct ForgeScriptServer {
     pub parsed_cache: Arc<RwLock<HashMap<Url, ParseResult>>>, // Parse result cache
     pub workspace_folders: Arc<RwLock<Vec<PathBuf>>>,     // Active workspaces
     pub multiple_function_colors: Arc<RwLock<bool>>,      // Semantic highlighting config
+    pub consistent_function_colors: Arc<RwLock<bool>>,    // Same color for same function
 }
 ```
 
@@ -247,7 +248,15 @@ async fn completion(&self, params: CompletionParams) -> Result<Option<Completion
             })
             .collect();
     }
-}
+**Enriched Documentation:**
+- Completion items now use `MarkupContent` (Markdown) for documentation.
+- **Signature**: Displays the full function signature in a code block.
+- **Description**: Human-readable description.
+- **Examples**: Shows up to 2 usage examples.
+- **Links**: Includes formatted links to GitHub and Documentation.
+
+**Extension Detail:**
+- The item `detail` field shows the extension name (e.g., `ForgeDB`) or the function category.
 ```
 
 **Modifier Support:**
