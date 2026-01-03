@@ -682,7 +682,8 @@ impl<'a> ForgeScriptParser<'a> {
                     // Case 1: Bracketed call - must match exactly
                     let lookup_key = format!("${}", full_name);
                     if let Some(func) = self.manager.get_exact(&lookup_key) {
-                        matched_function = Some((full_name.clone(), func));
+                        let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
+                        matched_function = Some((correct_name, func));
                     }
                 } else {
                     // Case 2: No bracket - find longest prefix match
