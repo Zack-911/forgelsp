@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// Some functions might have dynamic enum-like arguments that aren't strictly defined
 /// in the static metadata.
 /// Argument index starts from 0 not 1
-const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize)] = &[("color", 0)];
+const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize); 1] = &[("color", 0)];
 
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
@@ -700,7 +700,8 @@ impl<'a> ForgeScriptParser<'a> {
 
                         // Check if it's a valid prefix of our full_name
                         if full_name.to_lowercase().starts_with(matched_name) {
-                            matched_function = Some((matched_name.to_string(), func));
+                            let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
+                            matched_function = Some((correct_name, func));
                             // Calculate where the matched name ends
                             let matched_len_bytes = matched_name.len();
                             used_name_end = name_start_idx + matched_len_bytes;
