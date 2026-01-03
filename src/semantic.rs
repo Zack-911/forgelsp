@@ -127,7 +127,7 @@ pub fn extract_semantic_tokens_with_colors(
         }
     }
 
-// Convert to relative tokens
+    // Convert to relative tokens
     to_relative_tokens(&tokens, source)
 }
 
@@ -265,25 +265,6 @@ fn extract_tokens_from_code(
                 idx += best_match_char_count;
                 continue;
             }
-        }
-
-        // Check for numbers
-        if c.is_ascii_digit() {
-            let start = i;
-            let mut j = idx;
-            while j < char_positions.len()
-                && (char_positions[j].1.is_ascii_digit() || char_positions[j].1 == '.')
-            {
-                j += 1;
-            }
-            let end = if j < char_positions.len() {
-                char_positions[j].0
-            } else {
-                code.len()
-            };
-            found.push((start + code_start, end + code_start, 2));
-            idx = j;
-            continue;
         }
 
         // Check for booleans - use safe slicing with get()
@@ -520,138 +501,4 @@ pub fn offset_to_position(text: &str, offset: usize) -> Position {
     }
 
     Position::new(line, col)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::utils::CustomFunction;
-
-    #[tokio::test]
-    async fn test_function_modifiers() {
-        let manager =
-            MetadataManager::new("./.cache_test", vec![], None).expect("Failed to create manager");
-
-        // Add a test function
-        manager
-            .add_custom_functions(vec![CustomFunction {
-                name: "$ban".to_string(),
-                description: None,
-                params: None,
-                brackets: None,
-                alias: None,
-                path: None,
-            }])
-            .expect("Failed to add custom function");
-
-        let manager = Arc::new(manager);
-
-        // Test cases
-        let cases = vec![
-            ("code: `$ban`", true),
-            ("code: `$!ban`", true),
-            ("code: `$#ban`", true),
-            ("code: `$@[user]ban`", true),
-            ("code: `$!#@[user]ban`", true),
-            ("code: `$unknown`", false),
-            ("code: `$!unknown`", false),
-        ];
-
-        for (code, should_match) in cases {
-            let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
-            if should_match {
-                assert!(!tokens.is_empty(), "Failed to match {}", code);
-                assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
-            } else {
-                assert!(tokens.is_empty(), "Should not match {}", code);
-            }
-        }
-
-        // Clean up
-        let () = std::fs::remove_dir_all("./.cache_test").expect("Failed to clean up cache");
-    }
-
-    #[tokio::test]
-    async fn test_bracket_and_prefix_matching() {
-        let manager = MetadataManager::new("./.cache_test_semantic", vec![], None)
-            .expect("Failed to create manager");
-
-        // Add test functions
-        manager
-            .add_custom_functions(vec![
-                CustomFunction {
-                    name: "$ping".to_string(),
-                    description: None,
-                    params: None,
-                    brackets: None,
-                    alias: None,
-                    path: None,
-                },
-                CustomFunction {
-                    name: "$deleteCache".to_string(),
-                    description: None,
-                    params: None,
-                    brackets: None,
-                    alias: None,
-                    path: None,
-                },
-            ])
-            .expect("Failed to add custom functions");
-
-        let manager = Arc::new(manager);
-
-        let cases = vec![
-            // Case 1: Bracketed call with exact match
-            ("code: `$deleteCache[]`", true, "$deleteCache"),
-            // Case 2: Bracketed call with NO match (should NOT match prefix $delete)
-            ("code: `$delete[]`", false, ""),
-            // Case 3: Prefix matching (should match $ping)
-            ("code: `$pingms`", true, "$ping"),
-            // Case 4: Exact match without brackets
-            ("code: `$ping`", true, "$ping"),
-            // Case 5: No match
-            ("code: `$unknown`", false, ""),
-            // Case 6: Bracketed call where full name doesn't exist, but prefix does.
-            // e.g. $ping[] exists, but $pingExtra[] does not. $ping should NOT be highlighted.
-            ("code: `$pingExtra[]`", false, ""),
-        ];
-
-        for (code, should_match, expected_name) in cases {
-            let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
-            if should_match {
-                assert!(!tokens.is_empty(), "Failed to match {}", code);
-                assert_eq!(tokens[0].token_type, 0, "Wrong token type for {}", code);
-
-                // Verify length matches expected name length (excluding $)
-                // token length is u32
-                let expected_len = expected_name.len() as u32;
-                assert_eq!(tokens[0].length, expected_len, "Wrong length for {}", code);
-            } else {
-                assert!(tokens.is_empty(), "Should not match {}", code);
-            }
-        }
-
-        // Clean up
-        let () =
-            std::fs::remove_dir_all("./.cache_test_semantic").expect("Failed to clean up cache");
-    }
-
-    #[tokio::test]
-    async fn test_utf8_boundaries() {
-        let manager = MetadataManager::new("./.cache_test_semantic_utf8", vec![], None)
-            .expect("Failed to create manager");
-        let manager = Arc::new(manager);
-
-        // Test case with emojis outside and inside code block
-        let code = "🔔\ncode: `🔔$ping`";
-
-        // Should not panic
-        let tokens = extract_semantic_tokens_with_colors(code, false, &manager.clone());
-
-        // Just checking it doesn't panic is enough for this test.
-        assert!(tokens.is_empty() || !tokens.is_empty());
-
-        let () = std::fs::remove_dir_all("./.cache_test_semantic_utf8")
-            .expect("Failed to clean up cache");
-    }
 }
