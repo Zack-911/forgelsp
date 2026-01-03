@@ -688,13 +688,9 @@ impl<'a> ForgeScriptParser<'a> {
                 } else {
                     // Case 2: No bracket - find longest prefix match
                     let lookup_key = format!("${}", full_name);
-                    // manager.get now returns Option<Arc<Function>> (exact match wrapper? No, wait)
-                    // In metadata.rs, I changed get to return Option<Arc<Function>>?
                     if let Some((matched_name_with_prefix, func)) =
                         self.manager.get_with_match(&lookup_key)
                     {
-                        // matched_name_with_prefix includes '$' e.g. "$ping"
-                        // we need the name without '$'
                         let matched_name = matched_name_with_prefix
                             .strip_prefix('$')
                             .unwrap_or(&matched_name_with_prefix);
