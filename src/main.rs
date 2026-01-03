@@ -56,7 +56,8 @@ async fn main() {
         .expect("Failed to load metadata sources: check internet connection or URL validity");
 
     // Load custom functions from forgeconfig.json if available
-    if let Some(config) = load_forge_config_full(&workspace_folders)
+    // Load custom functions from forgeconfig.json if available
+    if let Some((config, _)) = load_forge_config_full(&workspace_folders)
         && let Some(custom_funcs) = config.custom_functions
         && !custom_funcs.is_empty()
     {
@@ -68,7 +69,7 @@ async fn main() {
     // Wrap manager in RwLock to allow dynamic updates during LSP operation
     // (e.g., when workspace configuration changes)
     let manager_wrapped = Arc::new(RwLock::new(manager));
-    let full_config = load_forge_config_full(&workspace_folders);
+    let full_config = load_forge_config_full(&workspace_folders).map(|(c, _)| c);
     let config_wrapped = Arc::new(RwLock::new(full_config.clone()));
 
     // Initialize LSP service with all required state

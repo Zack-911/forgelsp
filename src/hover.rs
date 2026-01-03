@@ -193,8 +193,7 @@ pub async fn handle_hover(
     }
 
     // Process modifiers to find the actual function name
-    // Modifiers can be: ! (silent), # (negated), @[...] (scope)
-    // Example: $!#@[user]ban
+    // Modifiers can be: ! (silent), # (negated), @[...] (seperator)
     let mut clean_token = raw_token.clone();
 
     if clean_token.starts_with('$') {

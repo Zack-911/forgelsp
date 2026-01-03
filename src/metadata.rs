@@ -707,6 +707,31 @@ impl MetadataManager {
         Ok(())
     }
 
+    /// Loads custom functions based on the provided configuration.
+    /// Supports both inline custom functions and loading from a specified path.
+    pub fn load_custom_functions_from_config(
+        &self,
+        config: &crate::utils::ForgeConfig,
+        config_dir: &Path,
+    ) -> Result<()> {
+        // 1. Load inline custom functions
+        if let Some(funcs) = &config.custom_functions {
+             if !funcs.is_empty() {
+                self.add_custom_functions(funcs.clone())?;
+             }
+        }
+
+        // 2. Load from custom_functions_path (relative to config_dir)
+        if let Some(custom_path) = &config.custom_functions_path {
+             let full_path = config_dir.join(custom_path);
+             if full_path.exists() {
+                 let _ = self.load_custom_functions_from_folder(full_path)?;
+             }
+        }
+
+        Ok(())
+    }
+
     /// Loads custom functions from all `.js` and `.ts` files in a folder and its subfolders.
     ///
     /// # Arguments

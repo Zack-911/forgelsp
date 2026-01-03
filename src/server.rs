@@ -178,67 +178,7 @@ impl tower_lsp::lsp_types::notification::Notification for CustomNotification {
     const METHOD: &'static str = "forge/highlights";
 }
 
-/// Helper to load custom functions from folders specified in the config.
-fn load_custom_functions_from_path(
-    client: &Client,
-    manager: &MetadataManager,
-    paths: &[PathBuf],
-    custom_path: &str,
-) {
-    spawn_log(
-        client.clone(),
-        MessageType::INFO,
-        format!("[INFO] Custom functions path from config: {custom_path}"),
-    );
-    for folder in paths {
-        let path = folder.join(custom_path);
-        spawn_log(
-            client.clone(),
-            MessageType::INFO,
-            format!(
-                "[INFO] Searching for custom functions in: {}",
-                path.display()
-            ),
-        );
-        if path.exists() {
-            match manager.load_custom_functions_from_folder(path) {
-                Ok((files, count)) => {
-                    spawn_log(
-                        client.clone(),
-                        MessageType::INFO,
-                        format!(
-                            "[INFO] Found {files_count} .js/.ts files, registered {count} custom functions",
-                            files_count = files.len()
-                        ),
-                    );
-                    for f in files {
-                        spawn_log(
-                            client.clone(),
-                            MessageType::INFO,
-                            format!("[INFO] Parsed file: {}", f.display()),
-                        );
-                    }
-                }
-                Err(e) => {
-                    spawn_log(
-                        client.clone(),
-                        MessageType::ERROR,
-                        format!("[ERROR] Failed to load custom functions from folder: {e}"),
-                    );
-                }
-            }
-        } else {
-            spawn_log(
-                client.clone(),
-                MessageType::WARNING,
-                format!(
-                    "[WARN] Custom functions path does not exist: {}",
-                    path.display()
-                ),
-            );
-        }
-    }
-}
+
 
 /// Returns the server capabilities for this LSP.
 fn build_capabilities() -> ServerCapabilities {
@@ -308,7 +248,7 @@ impl LanguageServer for ForgeScriptServer {
                 (*ws_folders).clone_from(&paths);
             }
 
-            if let Some(config) = load_forge_config_full(&paths) {
+            if let Some((config, config_path)) = load_forge_config_full(&paths) {
                 let urls = config.urls.clone();
                 let manager = MetadataManager::new("./.cache", urls, Some(self.client.clone()))
                     .expect("Failed to initialize metadata manager");
@@ -317,17 +257,10 @@ impl LanguageServer for ForgeScriptServer {
                     .await
                     .expect("Failed to load metadata sources");
 
-                // Load custom functions from config if available
-                if let Some(custom_funcs) = config.custom_functions.filter(|f| !f.is_empty()) {
-                    manager
-                        .add_custom_functions(custom_funcs)
-                        .expect("Failed to add custom functions");
-                }
-
-                // Load custom functions from path if available
-                if let Some(custom_path) = config.custom_functions_path {
-                    load_custom_functions_from_path(&self.client, &manager, &paths, &custom_path);
-                }
+                // Load custom functions using the config and its directory
+                manager
+                    .load_custom_functions_from_config(&config, &config_path)
+                    .expect("Failed to load custom functions");
 
                 *self.manager.write().expect("Server: manager lock poisoned") = Arc::new(manager);
 
@@ -345,8 +278,6 @@ impl LanguageServer for ForgeScriptServer {
                         .write()
                         .expect("Server: consistent_function_colors lock poisoned") = consistent;
                 }
-
-
             }
         }
 

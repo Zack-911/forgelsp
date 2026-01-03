@@ -94,30 +94,35 @@ pub struct ForgeConfig {
 /// These are expanded to:
 ///   `<https://raw.githubusercontent.com/owner/repo/<branch>/forge.json>`
 pub fn load_forge_config(workspace_folders: &[PathBuf]) -> Option<Vec<String>> {
-    load_forge_config_full(workspace_folders).map(|cfg| cfg.urls)
+    load_forge_config_full(workspace_folders).map(|(cfg, _)| cfg.urls)
 }
 
 /// Loads the full `forgeconfig.json` configuration from any workspace folder.
-pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<ForgeConfig> {
+/// Returns the config and the path to the directory containing the config file.
+pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<(ForgeConfig, PathBuf)> {
     for folder in workspace_folders {
-        let path = folder.join("forgeconfig.json");
+        // defined priority: 1. root, 2. .vscode
+        let possible_paths = [folder.join("forgeconfig.json"), folder.join(".vscode").join("forgeconfig.json")];
 
-        if !path.exists() {
-            continue;
+        for path in possible_paths {
+            if !path.exists() {
+                continue;
+            }
+
+            let Ok(data) = fs::read_to_string(&path) else {
+                continue;
+            };
+
+            let Ok(mut raw) = serde_json::from_str::<ForgeConfig>(&data) else {
+                continue;
+            };
+
+            // Transform shorthand URLs into fully-qualified URLs
+            raw.urls = raw.urls.into_iter().map(resolve_github_shorthand).collect();
+
+            // Return the config and the *directory* containing it
+            return Some((raw, path.parent().unwrap().to_path_buf()));
         }
-
-        let Ok(data) = fs::read_to_string(&path) else {
-            continue;
-        };
-
-        let Ok(mut raw) = serde_json::from_str::<ForgeConfig>(&data) else {
-            continue;
-        };
-
-        // Transform shorthand URLs into fully-qualified URLs
-        raw.urls = raw.urls.into_iter().map(resolve_github_shorthand).collect();
-
-        return Some(raw);
     }
 
     None
