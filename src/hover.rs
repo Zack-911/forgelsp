@@ -321,7 +321,7 @@ pub async fn handle_hover(
                 if parts.len() >= 5 {
                     let owner = parts[3];
                     let repo = parts[4];
-                    links.push(format!("[GitHub](https://github.com/{owner}/{repo})"));
+                    links.push(format!("[GitHub Repo](https://github.com/{owner}/{repo})"));
                 }
             }
         }
