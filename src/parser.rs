@@ -12,7 +12,7 @@
 //! error messages for invalid syntax or unknown functions.
 
 use crate::metadata::{Function, MetadataManager};
-use crate::utils::{find_matching_bracket_raw, is_escaped, is_escape_function};
+use crate::utils::{find_escape_function_end, find_matching_bracket, find_matching_bracket_raw, is_escaped, is_escape_function};
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -129,50 +129,6 @@ fn map_to_block(position: usize, block_lengths: &[usize]) -> (usize, usize) {
     (last_idx, last_offset)
 }
 
-/// Detect if we're at the start of an escape function and return its end position.
-/// Returns None if not at an escape function.
-/// This helps bracket matchers skip escape function contents entirely.
-fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
-    let bytes = code.as_bytes();
-
-    // Check if we're at a $ that's not escaped
-    if dollar_idx >= code.len() || bytes[dollar_idx] != b'$' {
-        return None;
-    }
-
-    if is_escaped(code, dollar_idx) {
-        return None;
-    }
-
-    // Skip $ and any modifiers (!, #)
-    let mut pos = dollar_idx + 1;
-    while pos < bytes.len() && (bytes[pos] == b'!' || bytes[pos] == b'#') {
-        pos += 1;
-    }
-
-    // Read function name
-    let name_start = pos;
-    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-        pos += 1;
-    }
-
-    if pos == name_start {
-        return None; // No function name
-    }
-
-    let name = &code[name_start..pos];
-    if !is_escape_function(name) {
-        return None; // Not an escape function
-    }
-
-    // Check for opening bracket
-    if pos >= bytes.len() || bytes[pos] != b'[' {
-        return None; // Escape function must have brackets
-    }
-
-    // Find the matching bracket using raw matching (no escape handling)
-    find_matching_bracket_raw(bytes, pos)
-}
 
 fn is_ignore_error_directive(code: &str, dollar_idx: usize) -> Option<usize> {
     let directive = "$c[fs@ignore-error]";
@@ -626,15 +582,12 @@ impl<'a> ForgeScriptParser<'a> {
                 '@' => {
                     let mut lookahead = iter.clone();
                     lookahead.next(); // consume '@'
-                    if let Some(&(_, '[')) = lookahead.peek() {
+                    if let Some(&(bracket_idx, '[')) = lookahead.peek() {
                         iter.next(); // consume '@'
                         iter.next(); // consume '['
-                        let mut depth = 1;
-                        for (_, c) in iter.by_ref() {
-                            if c == '[' { depth += 1; }
-                            else if c == ']' {
-                                depth -= 1;
-                                if depth == 0 { break; }
+                        if let Some(end_idx) = find_matching_bracket_raw(self.code.as_bytes(), bracket_idx) {
+                            while let Some(&(j, _)) = iter.peek() {
+                                if j <= end_idx { iter.next(); } else { break; }
                             }
                         }
                     } else {
@@ -950,50 +903,6 @@ fn find_matching_brace(code: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
-/// Find matching bracket respecting backslash escapes.
-/// Escaped brackets (\[ and \]) are not counted.
-/// Also skips over escape functions ($esc, $escape, $escapeCode) entirely.
-fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
-    let mut depth = 0;
-    let bytes = code.as_bytes();
-
-    // Use char_indices to ensure we're always on UTF-8 character boundaries
-    for (i, c) in code.char_indices().skip_while(|&(idx, _)| idx < open_idx) {
-        // Check if this character is escaped by a backslash
-        let is_esc = i > 0 && {
-            let mut backslash_count = 0;
-            let mut pos = i;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            backslash_count % 2 == 1
-        };
-
-        // Check if we're at the start of an escape function
-        if !is_esc && c == '$' && find_escape_function_end(code, i).is_some() {
-            // Skip the entire escape function - the for loop will continue past it
-            continue;
-        }
-
-        if !is_esc {
-            if c == '[' {
-                depth += 1;
-            } else if c == ']' {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-        }
-    }
-
-    None
-}
 
 fn parse_nested_args(
     input: &str,

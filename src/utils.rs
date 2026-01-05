@@ -227,6 +227,90 @@ pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
 }
 
 /// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
+/// This version respects ForgeScript escape sequences (2 backslashes for brackets).
+/// Also skips over escape functions ($esc, $escape, $escapeCode) entirely.
+pub fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut iter = code.char_indices().skip_while(|&(idx, _)| idx < open_idx);
+
+    while let Some((i, c)) = iter.next() {
+        if is_escaped(code, i) {
+            continue;
+        }
+
+        // Check if we're at the start of an escape function
+        if c == '$' {
+            if let Some(end_idx) = find_escape_function_end(code, i) {
+                // Skip the entire escape function
+                while let Some(&(idx, _)) = iter.clone().peekable().peek() {
+                    if idx <= end_idx {
+                        iter.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Detect if we're at the start of an escape function and return its end position.
+/// Returns None if not at an escape function.
+/// This helps bracket matchers skip escape function contents entirely.
+pub fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
+    let bytes = code.as_bytes();
+
+    // Check if we're at a $ that's not escaped
+    if dollar_idx >= code.len() || bytes[dollar_idx] != b'$' {
+        return None;
+    }
+
+    if is_escaped(code, dollar_idx) {
+        return None;
+    }
+
+    // Skip $ and any modifiers (!, #)
+    let mut pos = dollar_idx + 1;
+    while pos < bytes.len() && (bytes[pos] == b'!' || bytes[pos] == b'#') {
+        pos += 1;
+    }
+
+    // Read function name
+    let name_start = pos;
+    while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+        pos += 1;
+    }
+
+    if pos == name_start {
+        return None; // No function name
+    }
+
+    let name = &code[name_start..pos];
+    if !is_escape_function(name) {
+        return None; // Not an escape function
+    }
+
+    // Check for opening bracket
+    if pos >= bytes.len() || bytes[pos] != b'[' {
+        return None; // Escape function must have brackets
+    }
+
+    // Find the matching bracket using raw matching (no escape handling)
+    find_matching_bracket_raw(bytes, pos)
+}
+
+/// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
 /// This does NOT handle escape sequences and is used for raw content.
 pub fn find_matching_bracket_raw(bytes: &[u8], open_idx: usize) -> Option<usize> {
     let mut depth = 0;
@@ -315,5 +399,59 @@ pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
         }
     }
     pos
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_escaped() {
+        let code = r"foo \\$ bar";
+        assert!(is_escaped(code, 6)); // $ is at index 6, preceded by \\
+        
+        let code2 = r"foo \$ bar";
+        assert!(!is_escaped(code2, 5)); // $ is at index 5, only 1 \ before it (not enough for $)
+        
+        let code3 = r"print\\[\\]";
+        // p r i n t \ \ [ \ \ ]
+        // 0 1 2 3 4 5 6 7 8 9 0
+        assert!(is_escaped(code3, 7)); // [ is at 7
+        assert!(is_escaped(code3, 10)); // ] is at 10
+    }
+
+    #[test]
+    fn test_find_matching_bracket() {
+        // Simple case
+        let code = "$foo[bar]";
+        assert_eq!(find_matching_bracket(code, 4), Some(8));
+
+        // Escaped bracket inside
+        let code2 = r"$foo[bar\\[baz]";
+        // \ is at 8, \ at 9, [ at 10. So total length is 15.
+        // $ f o o [ b a r \  \  [  b  a  z  ]
+        // 0 1 2 3 4 5 6 7 8  9  10 11 12 13 14
+        assert_eq!(find_matching_bracket(code2, 4), Some(14));
+
+        // Escaped closing bracket
+        let code3 = r"$foo[bar\\]baz]";
+        assert_eq!(find_matching_bracket(code3, 4), Some(14));
+
+        // Nested brackets
+        let code4 = "$foo[bar[baz]]";
+        assert_eq!(find_matching_bracket(code4, 4), Some(13));
+        
+        // Escape function inside
+        let code5 = "$foo[bar$esc[ignore me]]";
+        assert_eq!(find_matching_bracket(code5, 4), Some(23));
+    }
+
+    #[test]
+    fn test_reported_issue() {
+        let code = r#"$advancedTextSplit[$httpResult;"videoData":\\[;1;,"player_version;0]"#;
+        // The first [ is at index 18 (after $advancedTextSplit)
+        assert_eq!(find_matching_bracket(code, 18), Some(code.len() - 1));
+    }
 }
 
