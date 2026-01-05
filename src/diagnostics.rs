@@ -5,38 +5,10 @@
 
 use crate::parser::Diagnostic as ParseDiagnostic;
 use crate::server::ForgeScriptServer;
+use crate::utils::offset_to_position;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
-/// Converts a byte offset in the source text to an LSP Position (line, character).
-///
-/// # Arguments
-/// * `text` - The source code
-/// * `offset` - Byte offset in the source
-///
-/// # Returns
-/// LSP Position with 0-indexed line and character numbers
-fn offset_to_position(text: &str, offset: usize) -> Position {
-    let mut line = 0;
-    let mut col = 0;
-
-    for (i, c) in text.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if c == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += c.len_utf16() as u32;
-        }
-    }
-
-    Position {
-        line,
-        character: col,
-    }
-}
 
 /// Publishes diagnostics to the LSP client for a given document.
 ///

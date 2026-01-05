@@ -9,60 +9,8 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::ForgeScriptServer;
-use crate::utils::spawn_log;
+use crate::utils::{is_escaped, position_to_offset, skip_modifiers, spawn_log};
 
-/// Checks if a character at the given byte index is escaped by a backslash.
-///
-/// Counts consecutive backslashes before the character:
-/// - Odd number of backslashes → character is escaped
-/// - Even number of backslashes → character is NOT escaped
-fn is_escaped(text: &str, byte_idx: usize) -> bool {
-    if byte_idx == 0 {
-        return false;
-    }
-
-    let bytes = text.as_bytes();
-    let mut backslash_count = 0;
-    let mut pos = byte_idx;
-
-    while pos > 0 {
-        pos -= 1;
-        if bytes[pos] == b'\\' {
-            backslash_count += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Odd number of backslashes means the character is escaped
-    backslash_count % 2 == 1
-}
-
-/// Converts an LSP Position (line, character) to a byte offset within the text.
-///
-/// Handles UTF-16 character counts correctly as required by the LSP specification.
-fn position_to_offset(text: &str, position: Position) -> Option<usize> {
-    let mut current_offset = 0;
-
-    for (line_num, line) in text.split_inclusive('\n').enumerate() {
-        if line_num as u32 == position.line {
-            let mut col = 0;
-            for (i, c) in line.char_indices() {
-                if col == position.character {
-                    return Some(current_offset + i);
-                }
-                col += c.len_utf16() as u32;
-            }
-            // Check if position is at the end of the line (e.g. after last char)
-            if col == position.character {
-                return Some(current_offset + line.len());
-            }
-            return None;
-        }
-        current_offset += line.len();
-    }
-    None
-}
 
 /// Handles LSP hover requests by identifying the ForgeScript function under the cursor.
 ///
@@ -197,42 +145,7 @@ pub async fn handle_hover(
     let mut clean_token = raw_token.clone();
 
     if clean_token.starts_with('$') {
-        let mut chars = clean_token.chars().peekable();
-        chars.next(); // consume $
-
-        let mut modifier_end_idx = 1; // start after $
-
-        while let Some(&c) = chars.peek() {
-            if c == '!' || c == '#' {
-                modifier_end_idx += 1;
-                chars.next();
-            } else if c == '@' {
-                // Handle @[...]
-                modifier_end_idx += 1;
-                chars.next(); // consume @
-
-                if let Some(&'[') = chars.peek() {
-                    modifier_end_idx += 1;
-                    chars.next(); // consume [
-
-                    // Find matching ]
-                    let mut depth = 1;
-                    for inner_c in chars.by_ref() {
-                        modifier_end_idx += inner_c.len_utf8();
-                        if inner_c == '[' {
-                            depth += 1;
-                        } else if inner_c == ']' {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else {
-                break;
-            }
-        }
+        let modifier_end_idx = skip_modifiers(&clean_token, 1);
 
         // Reconstruct the token with just $ + function name
         if modifier_end_idx > 1 {

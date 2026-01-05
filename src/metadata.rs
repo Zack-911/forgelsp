@@ -215,6 +215,11 @@ impl Fetcher {
         }
     }
 
+    fn get_from_cache<T: DeserializeOwned>(&self, path: &Path) -> Option<T> {
+        fs::read_to_string(path).ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+    }
+
     /// Fetches data from a URL or returns cached data if available.
     ///
     /// # Arguments
@@ -226,95 +231,47 @@ impl Fetcher {
         let path = self.cache_path(url);
 
         loop {
-            match self.http.get(url).send().await {
-                Ok(resp) => {
-                    if !resp.status().is_success() {
-                        if !mandatory {
-                            return Err(anyhow!("Optional file returned status {}: {}", resp.status(), url));
-                        }
-                    }
-
+            let res = self.http.get(url).send().await;
+            
+            match res {
+                Ok(resp) if resp.status().is_success() || mandatory => {
                     let body = resp.text().await?;
-
-                    // Validate JSON content
-                    match serde_json::from_str::<JsonValue>(&body) {
-                        Ok(json) => {
-                            if json.is_array() || json.is_object() {
-                                // Try to deserialize into T
-                                match serde_json::from_value::<T>(json) {
-                                    Ok(parsed) => {
-                                        fs::write(&path, &body)?;
-                                        return Ok(parsed);
-                                    }
-                                    Err(e) => {
-                                        // Network fetch was okay, but parsing into T failed.
-                                        // Fallback to cache if available.
-                                        if path.exists() {
-                                            if let Ok(data) = fs::read_to_string(&path) {
-                                                if let Ok(parsed) = serde_json::from_str::<T>(&data) {
-                                                    return Ok(parsed);
-                                                }
-                                            }
-                                        }
-
-                                        if mandatory && self.client.is_some() {
-                                            let retry = self.show_error_report(url, &format!("Data model mismatch: {e}")).await;
-                                            if retry {
-                                                continue;
-                                            }
-                                        }
-                                        return Err(anyhow!("Failed to parse JSON from {url} into data model: {e}"));
-                                    }
-                                }
-                            } else {
-                                // Probably HTML or something else
-                                if path.exists() {
-                                    if let Ok(data) = fs::read_to_string(&path) {
-                                        if let Ok(parsed) = serde_json::from_str::<T>(&data) {
-                                            return Ok(parsed);
-                                        }
-                                    }
-                                }
-
-                                if mandatory && self.client.is_some() {
-                                    let retry = self.show_error_report(url, "Received invalid JSON (likely HTML or plain text)").await;
-                                    if retry {
-                                        continue;
-                                    }
-                                }
-                                return Err(anyhow!("Received invalid JSON from {url}"));
+                    
+                    // Validate JSON and try to parse into T
+                    if let Ok(json) = serde_json::from_str::<JsonValue>(&body) {
+                        if json.is_array() || json.is_object() {
+                            if let Ok(parsed) = serde_json::from_value::<T>(json) {
+                                fs::write(&path, &body)?;
+                                return Ok(parsed);
                             }
-                        }
-                        Err(e) => {
-                            if path.exists() {
-                                if let Ok(data) = fs::read_to_string(&path) {
-                                    if let Ok(parsed) = serde_json::from_str::<T>(&data) {
-                                        return Ok(parsed);
-                                    }
-                                }
-                            }
-
-                            if mandatory && self.client.is_some() {
-                                let retry = self.show_error_report(url, &format!("JSON syntax error: {e}")).await;
-                                if retry {
-                                    continue;
-                                }
-                            }
-                            return Err(anyhow!("Failed to parse JSON from {url}: {e}"));
                         }
                     }
+
+                    // If we reach here, network fetch or JSON validation/parsing failed.
+                    // Try fallback to cache.
+                    if let Some(cached) = self.get_from_cache::<T>(&path) {
+                        return Ok(cached);
+                    }
+
+                    // If no cache and mandatory, show error report and possibly retry
+                    if mandatory && self.client.is_some() {
+                        if self.show_error_report(url, "Fetch failed or data model mismatch").await {
+                            continue;
+                        }
+                    }
+                    
+                    return Err(anyhow!("Failed to fetch or parse {url}"));
+                }
+                Ok(resp) => {
+                    return Err(anyhow!("Optional file returned status {}: {}", resp.status(), url));
                 }
                 Err(err) => {
-                    if path.exists() {
-                        let data = fs::read_to_string(&path)?;
-                        if let Ok(parsed) = serde_json::from_str::<T>(&data) {
-                            return Ok(parsed);
-                        }
+                    if let Some(cached) = self.get_from_cache::<T>(&path) {
+                        return Ok(cached);
                     }
 
                     if mandatory && self.client.is_some() {
-                        let retry = self.show_error_report(url, &format!("Network error: {err}")).await;
-                        if retry {
+                        if self.show_error_report(url, &format!("Network error: {err}")).await {
                             continue;
                         }
                     }

@@ -175,3 +175,145 @@ fn resolve_github_shorthand(input: String) -> String {
     // Construct the raw.githubusercontent.com URL
     format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}")
 }
+
+/// Check if a character at the given byte index is escaped.
+/// For backtick: 1 backslash escapes it (\`)
+/// For special chars ($, ;, [, ]): 2 backslashes escape it (\\$, \\;, etc.)
+pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
+    if byte_idx == 0 || !code.is_char_boundary(byte_idx) {
+        return false;
+    }
+
+    let bytes = code.as_bytes();
+    let c = bytes[byte_idx];
+
+    // For backtick, check if there's exactly 1 backslash before it
+    if c == b'`' {
+        if byte_idx >= 1 && bytes[byte_idx - 1] == b'\\' {
+            let mut backslash_count = 1;
+            let mut pos = byte_idx - 1;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            return backslash_count % 2 == 1;
+        }
+        return false;
+    }
+
+    // For special chars ($, ;, [, ]), check if there are exactly 2 backslashes before it
+    if matches!(c, b'$' | b';' | b'[' | b']') {
+        if byte_idx >= 2 && bytes[byte_idx - 1] == b'\\' && bytes[byte_idx - 2] == b'\\' {
+            let mut backslash_count = 2;
+            let mut pos = byte_idx - 2;
+            while pos > 0 {
+                pos -= 1;
+                if bytes[pos] == b'\\' {
+                    backslash_count += 1;
+                } else {
+                    break;
+                }
+            }
+            return backslash_count == 2 || backslash_count % 2 == 0;
+        }
+        return false;
+    }
+
+    false
+}
+
+/// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
+/// This does NOT handle escape sequences and is used for raw content.
+pub fn find_matching_bracket_raw(bytes: &[u8], open_idx: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, &byte) in bytes.iter().enumerate().skip(open_idx) {
+        if byte == b'[' {
+            depth += 1;
+        } else if byte == b']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Converts a byte offset within a string to an LSP Position (line and character).
+pub fn offset_to_position(text: &str, offset: usize) -> Position {
+    let mut line = 0u32;
+    let mut col = 0u32;
+
+    for (i, ch) in text.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += u32::try_from(ch.len_utf16()).expect("UTF-16 length exceeds u32");
+        }
+    }
+
+    Position::new(line, col)
+}
+
+/// Converts an LSP Position (line, character) to a byte offset within the text.
+pub fn position_to_offset(text: &str, position: Position) -> Option<usize> {
+    let mut current_offset = 0;
+
+    for (line_num, line) in text.split_inclusive('\n').enumerate() {
+        if line_num as u32 == position.line {
+            let mut col = 0;
+            for (i, c) in line.char_indices() {
+                if col == position.character {
+                    return Some(current_offset + i);
+                }
+                col += c.len_utf16() as u32;
+            }
+            if col == position.character {
+                return Some(current_offset + line.len());
+            }
+            return None;
+        }
+        current_offset += line.len();
+    }
+    None
+}
+
+/// Checks if the function name is an escape function.
+pub fn is_escape_function(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "esc" || lower == "escape" || lower == "escapecode"
+}
+
+/// Returns the index after modifiers (!, #, @[...]).
+pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut pos = start_idx;
+
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'!' | b'#' => pos += 1,
+            b'@' => {
+                if pos + 1 < bytes.len() && bytes[pos + 1] == b'[' {
+                    if let Some(end_idx) = find_matching_bracket_raw(bytes, pos + 1) {
+                        pos = end_idx + 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    pos
+}
+

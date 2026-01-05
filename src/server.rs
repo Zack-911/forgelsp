@@ -21,7 +21,7 @@ use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
-use crate::utils::{ForgeConfig, load_forge_config_full, spawn_log};
+use crate::utils::{ForgeConfig, load_forge_config_full, position_to_offset, spawn_log};
 use regex::Regex;
 use tower_lsp::Client;
 use tower_lsp::LanguageServer;
@@ -105,27 +105,7 @@ impl ForgeScriptServer {
         mgr.function_count()
     }
 
-    /// Returns a list of all functions managed by the server.
-    pub fn all_functions(&self) -> Vec<Arc<crate::metadata::Function>> {
-        let mgr = self.manager.read().expect("Server: manager lock poisoned");
-        mgr.all_functions()
-    }
 
-    /// Convert UTF-16 character offset to byte offset for a line
-    fn get_byte_offset(line: &str, utf16_col: u32) -> usize {
-        let mut col = 0;
-        for (i, c) in line.char_indices() {
-            if col == utf16_col {
-                return i;
-            }
-            col += u32::try_from(c.len_utf16()).expect("UTF-16 length exceeds u32");
-        }
-        if col == utf16_col {
-            return line.len();
-        }
-        // Fallback to clamping to line length if out of bounds
-        line.len()
-    }
 
     /// Sends dynamic highlights notification to the client.
     pub async fn send_highlights(&self, uri: Url, text: &str) {
@@ -154,8 +134,8 @@ impl ForgeScriptServer {
         let highlights = ranges
             .into_iter()
             .map(|(start, end, color)| {
-                let start_pos = crate::semantic::offset_to_position(text, start);
-                let end_pos = crate::semantic::offset_to_position(text, end);
+                let start_pos = crate::utils::offset_to_position(text, start);
+                let end_pos = crate::utils::offset_to_position(text, end);
                 HighlightRange {
                     range: Range::new(start_pos, end_pos),
                     color,
@@ -169,6 +149,235 @@ impl ForgeScriptServer {
                 highlights,
             })
             .await;
+    }
+
+    fn get_text_up_to_cursor(&self, text: &str, position: Position) -> String {
+        let mut text_up_to_cursor = if let Some(offset) = position_to_offset(text, position) {
+            text[..offset].to_string()
+        } else {
+            text.to_string()
+        };
+
+        // Cap to last 8KB for efficiency
+        if text_up_to_cursor.len() > 8 * 1024 {
+            let len = text_up_to_cursor.len();
+            text_up_to_cursor = text_up_to_cursor[len - 8 * 1024..].to_string();
+        }
+        text_up_to_cursor
+    }
+
+    fn find_active_function_call(&self, text_up_to_cursor: &str) -> Option<(String, usize)> {
+        let mut depth = 0i32;
+        let mut last_open_index: Option<usize> = None;
+
+        for (idx, ch) in text_up_to_cursor.char_indices().rev() {
+            match ch {
+                ']' => depth += 1,
+                '[' => {
+                    if depth == 0 {
+                        last_open_index = Some(idx);
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+
+        let open_index = last_open_index?;
+        let before_bracket = &text_up_to_cursor[..open_index];
+        let caps = SIGNATURE_FUNC_RE.captures(before_bracket)?;
+        let func_name = caps.get(1)?.as_str().to_string();
+
+        Some((func_name, open_index))
+    }
+
+    fn compute_active_param_index(&self, text_after_bracket: &str) -> u32 {
+        let mut param_index: u32 = 0;
+        let mut local_depth: i32 = 0;
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut prev_escape = false;
+
+        for ch in text_after_bracket.chars() {
+            if prev_escape {
+                prev_escape = false;
+                continue;
+            }
+
+            if ch == '\\' {
+                prev_escape = true;
+                continue;
+            }
+
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+
+            if in_single || in_double {
+                continue;
+            }
+
+            match ch {
+                '[' => local_depth += 1,
+                ']' => {
+                    if local_depth > 0 {
+                        local_depth -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                ',' | ';' if local_depth == 0 => {
+                    param_index = param_index.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        param_index
+    }
+
+    fn build_signature_help_parameters(
+        &self,
+        func: &crate::metadata::Function,
+        mgr: &MetadataManager,
+    ) -> Vec<ParameterInformation> {
+        let args = func.args.clone().unwrap_or_default();
+        args.iter()
+            .map(|a| {
+                let mut name = String::new();
+                if a.rest {
+                    name.push_str("...");
+                }
+                name.push_str(&a.name);
+                if a.required == Some(false) {
+                    name.push('?');
+                }
+
+                let mut doc = a.description.clone();
+
+                if let Some(enum_name) = &a.enum_name {
+                    if let Some(values) = mgr
+                        .enums
+                        .read()
+                        .expect("Server: enums lock poisoned")
+                        .get(enum_name)
+                    {
+                        let _ = writeln!(doc, "\n\n**{enum_name}**:");
+                        for v in values {
+                            let _ = writeln!(doc, "- {v}");
+                        }
+                    }
+                } else if let Some(values) = &a.arg_enum {
+                    doc.push_str("\n\n**Values**:\n");
+                    for v in values {
+                        doc.push_str("- ");
+                        doc.push_str(v);
+                        doc.push('\n');
+                    }
+                }
+
+                ParameterInformation {
+                    label: ParameterLabel::Simple(name),
+                    documentation: Some(Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: doc,
+                    })),
+                }
+            })
+            .collect()
+    }
+
+    fn build_completion_item(
+        &self,
+        f: Arc<crate::metadata::Function>,
+        modifier: &str,
+    ) -> CompletionItem {
+        let base = f.name.clone();
+        let name = if !modifier.is_empty() && base.starts_with('$') {
+            format!("${modifier}{}", &base[1..])
+        } else {
+            base.clone()
+        };
+
+        let md = self.build_completion_markdown(&f);
+
+        CompletionItem {
+            label: name.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(f.extension.clone().unwrap_or_else(|| {
+                f.category
+                    .clone()
+                    .unwrap_or_else(|| "Function".to_string())
+            })),
+            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: md,
+            })),
+            insert_text: Some(name),
+            filter_text: Some(base),
+            ..Default::default()
+        }
+    }
+
+    fn build_completion_markdown(&self, f: &Arc<crate::metadata::Function>) -> String {
+        let mut md = String::new();
+
+        // Code block with signature
+        md.push_str("```forgescript\n");
+        md.push_str(&f.signature_label());
+        md.push_str("\n```\n\n");
+
+        if !f.description.is_empty() {
+            md.push_str(&f.description);
+            md.push_str("\n\n");
+        }
+
+        if let Some(examples) = &f.examples {
+            if !examples.is_empty() {
+                md.push_str("**Examples:**\n");
+                for ex in examples.iter().take(2) {
+                    md.push_str("\n```forgescript\n");
+                    md.push_str(ex);
+                    md.push_str("\n```\n");
+                }
+            }
+        }
+
+        // Links
+        let mut links = Vec::new();
+        if let Some(url) = &f.source_url {
+            if url.contains("githubusercontent.com") {
+                let parts: Vec<&str> = url.split('/').collect();
+                if parts.len() >= 5 {
+                    let owner = parts[3];
+                    let repo = parts[4];
+                    links.push(format!("[GitHub](https://github.com/{owner}/{repo})"));
+                }
+            }
+        }
+
+        if let Some(extension) = &f.extension {
+            let base_url = "https://docs.botforge.org";
+            links.push(format!(
+                "[Documentation]({base_url}/function/{func_name}?p={extension})",
+                base_url = base_url,
+                func_name = f.name,
+                extension = extension
+            ));
+        }
+
+        if !links.is_empty() {
+            md.push_str("\n---\n");
+            md.push_str(&links.join(" | "));
+        }
+
+        md
     }
 }
 
@@ -389,114 +598,44 @@ impl LanguageServer for ForgeScriptServer {
             .expect("Server: documents lock poisoned");
         let text = docs.get(&uri);
 
-        if let Some(text) = text {
-            let lines: Vec<&str> = text.lines().collect();
-            let line = lines.get(position.line as usize).unwrap_or(&"");
+        let Some(text) = text else { return Ok(None); };
 
-            let byte_offset = Self::get_byte_offset(line, position.character);
-            let before_cursor = &line[..byte_offset];
+        let lines: Vec<&str> = text.lines().collect();
+        let line = lines.get(position.line as usize).unwrap_or(&"");
 
-            if let Some(last_dollar_idx) = before_cursor.rfind('$') {
-                let after_dollar = &before_cursor[last_dollar_idx + 1..];
-                let mut modifier = "";
+        let byte_offset = position_to_offset(line, Position::new(0, position.character)).unwrap_or(line.len());
+        let before_cursor = &line[..byte_offset];
 
-                if after_dollar.starts_with('!') {
-                    modifier = "!";
-                } else if after_dollar.starts_with('.') {
-                    modifier = ".";
-                }
+        let Some(last_dollar_idx) = before_cursor.rfind('$') else {
+            return Ok(None);
+        };
 
-                let items: Vec<CompletionItem> = self
-                    .all_functions()
-                    .into_iter()
-                    .map(|f| {
-                        let base = f.name.clone();
-                        let name = if !modifier.is_empty() && base.starts_with('$') {
-                            format!("${modifier}{}", &base[1..])
-                        } else {
-                            base.clone()
-                        };
+        let after_dollar = &before_cursor[last_dollar_idx + 1..];
+        let mut modifier = "";
 
-                        let mut md = String::new();
-                        
-                        // Code block with signature
-                        md.push_str("```forgescript\n");
-                        md.push_str(&f.signature_label());
-                        md.push_str("\n```\n\n");
-
-                        if !f.description.is_empty() {
-                            md.push_str(&f.description);
-                            md.push_str("\n\n");
-                        }
-
-                        if let Some(examples) = &f.examples {
-                            if !examples.is_empty() {
-                                md.push_str("**Examples:**\n");
-                                for ex in examples.iter().take(2) {
-                                    md.push_str("\n```forgescript\n");
-                                    md.push_str(ex);
-                                    md.push_str("\n```\n");
-                                }
-                            }
-                        }
-
-                        // Links
-                        let mut links = Vec::new();
-                        if let Some(url) = &f.source_url {
-                            if url.contains("githubusercontent.com") {
-                                let parts: Vec<&str> = url.split('/').collect();
-                                if parts.len() >= 5 {
-                                    let owner = parts[3];
-                                    let repo = parts[4];
-                                    links.push(format!("[GitHub](https://github.com/{owner}/{repo})"));
-                                }
-                            }
-                        }
-
-                        if let Some(extension) = &f.extension {
-                            let base_url = "https://docs.botforge.org";
-                            links.push(format!(
-                                "[Documentation]({base_url}/function/{func_name}?p={extension})",
-                                base_url = base_url,
-                                func_name = f.name,
-                                extension = extension
-                            ));
-                        }
-
-                        if !links.is_empty() {
-                            md.push_str("\n---\n");
-                            md.push_str(&links.join(" | "));
-                        }
-
-                        CompletionItem {
-                            label: name.clone(),
-                            kind: Some(CompletionItemKind::FUNCTION),
-                            detail: Some(f.extension.clone().unwrap_or_else(|| f.category.clone().unwrap_or_else(|| "Function".to_string()))),
-                            documentation: Some(Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: md,
-                            })),
-                            insert_text: Some(name),
-                            filter_text: Some(base),
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-
-                spawn_log(
-                    self.client.clone(),
-                    MessageType::LOG,
-                    format!(
-                        "[PERF] completion: {count} items in {elapsed:?}",
-                        count = items.len(),
-                        elapsed = start.elapsed()
-                    ),
-                );
-                return Ok(Some(CompletionResponse::Array(items)));
-            }
+        if after_dollar.starts_with('!') {
+            modifier = "!";
+        } else if after_dollar.starts_with('.') {
+            modifier = ".";
         }
 
-        Ok(None)
+        let mgr = self.manager.read().expect("Server: manager lock poisoned").clone();
+        let items: Vec<CompletionItem> = mgr
+            .all_functions()
+            .into_iter()
+            .map(|f| self.build_completion_item(f, modifier))
+            .collect();
+
+        spawn_log(
+            self.client.clone(),
+            MessageType::LOG,
+            format!(
+                "[PERF] completion: {count} items in {elapsed:?}",
+                count = items.len(),
+                elapsed = start.elapsed()
+            ),
+        );
+        Ok(Some(CompletionResponse::Array(items)))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -505,173 +644,21 @@ impl LanguageServer for ForgeScriptServer {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let docs = self
-            .documents
-            .read()
-            .expect("Server: documents lock poisoned");
-        let Some(text) = docs.get(&uri) else {
+        let docs = self.documents.read().expect("Server: documents lock poisoned");
+        let Some(text) = docs.get(&uri) else { return Ok(None); };
+
+        let text_up_to_cursor = self.get_text_up_to_cursor(text, position);
+        let Some((func_name, open_index)) = self.find_active_function_call(&text_up_to_cursor) else {
             return Ok(None);
         };
 
-        // Gather everything before the cursor
-        let mut text_up_to_cursor = String::new();
-        for (i, line) in text.lines().enumerate() {
-            if i < position.line as usize {
-                text_up_to_cursor.push_str(line);
-                text_up_to_cursor.push('\n');
-            } else if i == position.line as usize {
-                let byte_offset = Self::get_byte_offset(line, position.character);
-                let slice = &line[..byte_offset];
-                text_up_to_cursor.push_str(slice);
-                break;
-            }
-        }
+        let param_index = self.compute_active_param_index(&text_up_to_cursor[open_index + 1..]);
 
-        // Cap to last 8KB for efficiency
-        if text_up_to_cursor.len() > 8 * 1024 {
-            let len = text_up_to_cursor.len();
-            text_up_to_cursor = text_up_to_cursor[len - 8 * 1024..].to_string();
-        }
-
-        // Scan backwards to find the nearest unmatched '['
-        let mut depth = 0i32;
-        let mut last_open_index: Option<usize> = None;
-
-        for (idx, ch) in text_up_to_cursor.char_indices().rev() {
-            match ch {
-                ']' => depth += 1,
-                '[' => {
-                    if depth == 0 {
-                        last_open_index = Some(idx);
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-
-        let Some(open_index) = last_open_index else {
-            return Ok(None);
-        };
-
-        // Extract the function name before the '['
-        let before_bracket = &text_up_to_cursor[..open_index];
-        let Some(caps) = SIGNATURE_FUNC_RE.captures(before_bracket) else {
-            return Ok(None);
-        };
-
-        let func_name = caps
-            .get(1)
-            .expect("Server: signature regex capture group missing")
-            .as_str();
-
-        // Compute active parameter index
-        let start_scan = open_index + 1;
-        let sub = &text_up_to_cursor[start_scan..];
-        let mut param_index: u32 = 0;
-        let mut local_depth: i32 = 0;
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut prev_escape = false;
-
-        for ch in sub.chars() {
-            if prev_escape {
-                prev_escape = false;
-                continue;
-            }
-
-            if ch == '\\' {
-                prev_escape = true;
-                continue;
-            }
-
-            if ch == '\'' && !in_double {
-                in_single = !in_single;
-                continue;
-            }
-
-            if ch == '"' && !in_single {
-                in_double = !in_double;
-                continue;
-            }
-
-            if in_single || in_double {
-                continue;
-            }
-
-            match ch {
-                '[' => local_depth += 1,
-                ']' => {
-                    if local_depth > 0 {
-                        local_depth -= 1;
-                    } else {
-                        break;
-                    }
-                }
-                ',' | ';' if local_depth == 0 => {
-                    param_index = param_index.saturating_add(1);
-                }
-                _ => {}
-            }
-        }
-
-        // Look up metadata and return signature help
-        let mgr = self
-            .manager
-            .read()
-            .expect("Server: manager lock poisoned")
-            .clone();
+        let mgr = self.manager.read().expect("Server: manager lock poisoned").clone();
         let lookup = format!("${func_name}");
 
         if let Some(func) = mgr.get(&lookup) {
-            let args = func.args.clone().unwrap_or_default();
-            let params: Vec<ParameterInformation> = args
-                .iter()
-                .map(|a| {
-                    let mut name = String::new();
-                    if a.rest {
-                        name.push_str("...");
-                    }
-                    name.push_str(&a.name);
-                    if a.required == Some(false) {
-                        name.push('?');
-                    }
-
-                    let mut doc = a.description.clone();
-
-                    if let Some(enum_name) = &a.enum_name {
-                        if let Some(values) = mgr
-                            .enums
-                            .read()
-                            .expect("Server: enums lock poisoned")
-                            .get(enum_name)
-                        {
-                            let _ = writeln!(doc, "\n\n**{enum_name}**:");
-                            for v in values {
-                                let _ = writeln!(doc, "- {v}");
-                            }
-                        }
-                    } else if let Some(values) = &a.arg_enum {
-                        // Handle inline enums if any
-                        doc.push_str("\n\n**Values**:\n");
-                        for v in values {
-                            doc.push_str("- ");
-                            doc.push_str(v);
-                            doc.push('\n');
-                        }
-                    }
-
-                    ParameterInformation {
-                        label: ParameterLabel::Simple(name),
-                        documentation: Some(Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: doc,
-                        })),
-                    }
-                })
-                .collect();
-
+            let params = self.build_signature_help_parameters(&func, &mgr);
             let sig_label = func.signature_label();
 
             let signature = SignatureInformation {

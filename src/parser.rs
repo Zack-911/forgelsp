@@ -12,6 +12,7 @@
 //! error messages for invalid syntax or unknown functions.
 
 use crate::metadata::{Function, MetadataManager};
+use crate::utils::{find_matching_bracket_raw, is_escaped, is_escape_function};
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -128,116 +129,6 @@ fn map_to_block(position: usize, block_lengths: &[usize]) -> (usize, usize) {
     (last_idx, last_offset)
 }
 
-/// Check if a character at the given byte index is escaped.
-/// For backtick: 1 backslash escapes it (\`)
-/// For special chars ($, ;, [, ]): 2 backslashes escape it (\\$, \\;, etc.)
-fn is_escaped(code: &str, byte_idx: usize) -> bool {
-    if byte_idx == 0 {
-        return false;
-    }
-
-    // Validate that byte_idx is on a character boundary
-    if !code.is_char_boundary(byte_idx) {
-        return false;
-    }
-
-    let bytes = code.as_bytes();
-    let c = bytes[byte_idx];
-
-    // For backtick, check if there's exactly 1 backslash before it
-    if c == b'`' {
-        if byte_idx >= 1 && bytes[byte_idx - 1] == b'\\' {
-            // Check if the backslash itself is escaped (even number of backslashes before it)
-            let mut backslash_count = 1;
-            let mut pos = byte_idx - 1;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            // If odd number of total backslashes, the backtick is escaped
-            return backslash_count % 2 == 1;
-        }
-        return false;
-    }
-
-    // For special chars ($, ;, [, ]), check if there are exactly 2 backslashes before it
-    if matches!(c, b'$' | b';' | b'[' | b']') {
-        if byte_idx >= 2 && bytes[byte_idx - 1] == b'\\' && bytes[byte_idx - 2] == b'\\' {
-            // Check if the backslashes themselves are escaped
-            let mut backslash_count = 2;
-            let mut pos = byte_idx - 2;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            // If exactly 2 backslashes (even total), the char is escaped
-            return backslash_count == 2 || backslash_count % 2 == 0;
-        }
-        return false;
-    }
-
-    false
-}
-
-/// Process escape sequences in a string, returning the unescaped version.
-/// Handles: \` -> `, \\$ -> $, \\[ -> [, \\] -> ], \\; -> ;, \\\\ -> \\
-#[allow(dead_code)]
-pub fn unescape_string(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            if i + 1 < bytes.len() {
-                let next = bytes[i + 1];
-                // Check for backtick escape: \`
-                if next == b'`' {
-                    result.push('`');
-                    i += 2;
-                    continue;
-                }
-                // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
-                if i + 2 < bytes.len() && next == b'\\' {
-                    let third = bytes[i + 2];
-                    if matches!(third, b'$' | b';' | b'[' | b']') {
-                        result.push(third as char);
-                        i += 3;
-                        continue;
-                    }
-                    if third == b'\\' {
-                        result.push('\\');
-                        i += 3;
-                        continue;
-                    }
-                }
-            }
-            // Keep the backslash if it's not a recognized escape
-            result.push('\\');
-            i += 1;
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    result
-}
-
-/// Check if the function name is an escape function ($esc or $escape)
-fn is_escape_function(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "esc" || lower == "escape" || lower == "escapecode"
-}
-
 /// Detect if we're at the start of an escape function and return its end position.
 /// Returns None if not at an escape function.
 /// This helps bracket matchers skip escape function contents entirely.
@@ -280,7 +171,7 @@ fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> {
     }
 
     // Find the matching bracket using raw matching (no escape handling)
-    find_matching_bracket_raw(code, pos)
+    find_matching_bracket_raw(bytes, pos)
 }
 
 fn is_ignore_error_directive(code: &str, dollar_idx: usize) -> Option<usize> {
@@ -428,46 +319,8 @@ impl<'a> ForgeScriptParser<'a> {
 
         while let Some((idx, c)) = iter.next() {
             // Handle backslash escaping
-            if c == '\\'
-                && let Some(&(_next_idx, next_c)) = iter.peek()
-            {
-                // Check for backtick escape: \`
-                if next_c == '`' {
-                    // Push text before the backslash
-                    if last_idx < idx {
-                        tokens.push(Token {
-                            kind: TokenKind::Text,
-                            text: self.code[last_idx..idx].to_string(),
-                            start: last_idx,
-                            end: idx,
-                        });
-                    }
-                    iter.next(); // consume the backtick
-                    last_idx = idx; // Start from backslash
-                    continue;
-                }
-                // Check for double backslash escapes: \\$, \\;, \\[, \\]
-                if next_c == '\\' {
-                    // Look ahead one more character
-                    iter.next(); // consume second backslash
-                    if let Some(&(_third_idx, third_c)) = iter.peek()
-                        && matches!(third_c, '$' | '[' | ']' | ';' | '\\')
-                    {
-                        // Push text before the first backslash
-                        if last_idx < idx {
-                            tokens.push(Token {
-                                kind: TokenKind::Text,
-                                text: self.code[last_idx..idx].to_string(),
-                                start: last_idx,
-                                end: idx,
-                            });
-                        }
-                        iter.next(); // consume the escaped character
-                        last_idx = idx; // Start from first backslash
-                        continue;
-                    }
-                    continue; // Skip the double backslash if not escaping anything
-                }
+            if self.handle_backslash_escape(&mut iter, idx, c, &mut last_idx, &mut tokens) {
+                continue;
             }
 
             if c == '\n' {
@@ -512,98 +365,23 @@ impl<'a> ForgeScriptParser<'a> {
 
                 // Check for JavaScript expression ${...}
                 if let Some(&(brace_idx, '{')) = iter.peek() {
-                    if let Some(end_idx) = find_matching_brace(self.code, brace_idx) {
-                        // Everything inside is JavaScript code
-                        let js_content = &self.code[brace_idx + 1..end_idx];
-
-                        // Advance iterator past the closing brace
-                        while let Some(&(j, _)) = iter.peek() {
-                            if j <= end_idx {
-                                iter.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        last_idx = end_idx + 1;
-
-                        // Create a JavaScript token
-                        tokens.push(Token {
-                            kind: TokenKind::JavaScript,
-                            text: js_content.to_string(),
-                            start,
-                            end: last_idx,
-                        });
+                    if self.handle_js_expression(
+                        &mut iter,
+                        start,
+                        brace_idx,
+                        &mut last_idx,
+                        &mut tokens,
+                        &mut diagnostics,
+                        ignore_next_line,
+                    ) {
                         continue;
                     }
-                    if !ignore_next_line {
-                        diagnostics.push(Diagnostic {
-                            message: "Unclosed '{' for JavaScript expression `${...}`".to_string(),
-                            start,
-                            end: self.code.len(),
-                        });
-                    }
-                    last_idx = self.code.len();
-                    continue;
                 }
 
-                let mut silent = false;
-                let mut negated = false;
-
-                // Loop to handle multiple modifiers (e.g. $!#@[...])
-                while let Some(&(_, next_c)) = iter.peek() {
-                    if next_c == '!' {
-                        silent = true;
-                        iter.next();
-                    } else if next_c == '#' {
-                        negated = true;
-                        iter.next();
-                    } else if next_c == '@' {
-                        let mut lookahead = iter.clone();
-                        lookahead.next(); // consume '@'
-                        if let Some(&(_, '[')) = lookahead.peek() {
-                            iter.next(); // consume '@'
-                            iter.next(); // consume '['
-                            let mut depth = 1;
-                            for (_, c) in iter.by_ref() {
-                                if c == '[' {
-                                    depth += 1;
-                                } else if c == ']' {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                let (silent, negated) = self.handle_modifiers(&mut iter);
 
                 // read function name
-                let name_start_idx = if let Some(&(i, _)) = iter.peek() {
-                    i
-                } else {
-                    self.code.len()
-                };
-
-                let mut name_chars = vec![];
-                let mut full_name_end = name_start_idx;
-
-                // Clone iterator to read name without consuming if we need to backtrack?
-                // Actually we can consume, and if we have a suffix, we just emit it as text.
-                while let Some(&(i, ch)) = iter.peek() {
-                    if ch.is_alphanumeric() || ch == '_' {
-                        name_chars.push(ch);
-                        full_name_end = i + ch.len_utf8();
-                        iter.next();
-                    } else {
-                        break;
-                    }
-                }
-                let full_name = name_chars.iter().collect::<String>();
+                let (full_name, name_start_idx, full_name_end) = self.extract_function_name(&mut iter);
 
                 // If name is empty (e.g. just `$!`), handle gracefully
                 if full_name.is_empty() {
@@ -613,368 +391,55 @@ impl<'a> ForgeScriptParser<'a> {
                 }
 
                 // Check if this is an escape function ($esc or $escape)
-                if is_escape_function(&full_name) {
-                    // Handle $esc[...] and $escape[...]
-                    if let Some(&(bracket_idx, '[')) = iter.peek() {
-                        if let Some(end_idx) = find_matching_bracket_raw(self.code, bracket_idx) {
-                            // Everything inside is treated as literal escaped text
-                            let escaped_content = &self.code[bracket_idx + 1..end_idx];
-
-                            // Advance iterator past the closing bracket
-                            while let Some(&(j, _)) = iter.peek() {
-                                if j <= end_idx {
-                                    iter.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            last_idx = end_idx + 1;
-
-                            // Create an escaped text token
-                            tokens.push(Token {
-                                kind: TokenKind::Escaped,
-                                text: escaped_content.to_string(),
-                                start,
-                                end: last_idx,
-                            });
-                            continue;
-                        }
-                        if !ignore_next_line {
-                            diagnostics.push(Diagnostic {
-                                message: format!(
-                                    "Unclosed '[' for escape function `${full_name}`",
-                                ),
-                                start,
-                                end: self.code.len(),
-                            });
-                        }
-                        last_idx = self.code.len();
-                        continue;
-                    }
-                    // $esc or $escape without brackets - treat as unknown function
-                    if !ignore_next_line {
-                        diagnostics.push(Diagnostic {
-                            message: format!(
-                                "${full_name} expects brackets `[...]` containing content to escape",
-                            ),
-                            start,
-                            end: full_name_end,
-                        });
-                    }
-                    tokens.push(Token {
-                        kind: TokenKind::Unknown,
-                        text: self.code[start..full_name_end].to_string(),
-                        start,
-                        end: full_name_end,
-                    });
-                    last_idx = full_name_end;
+                if self.handle_escape_function(
+                    &mut iter,
+                    start,
+                    &full_name,
+                    full_name_end,
+                    &mut last_idx,
+                    &mut tokens,
+                    &mut diagnostics,
+                    ignore_next_line,
+                ) {
                     continue;
                 }
 
                 // Determine the actual function name to use
-                let mut matched_function: Option<(String, Arc<Function>)> = None;
-                let mut used_name_end = full_name_end;
-
-                // Check for bracket lookahead
-                let has_bracket = matches!(iter.peek(), Some(&(_, '[')));
-
-                if has_bracket {
-                    // Case 1: Bracketed call - must match exactly
-                    let lookup_key = format!("${}", full_name);
-                    if let Some(func) = self.manager.get_exact(&lookup_key) {
-                        let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
-                        matched_function = Some((correct_name, func));
-                    }
-                } else {
-                    // Case 2: No bracket - find longest prefix match
-                    let lookup_key = format!("${}", full_name);
-                    if let Some((matched_name_with_prefix, func)) =
-                        self.manager.get_with_match(&lookup_key)
-                    {
-                        let matched_name = matched_name_with_prefix
-                            .strip_prefix('$')
-                            .unwrap_or(&matched_name_with_prefix);
-
-                        // Check if it's a valid prefix of our full_name
-                        if full_name.to_lowercase().starts_with(matched_name) {
-                            let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
-                            matched_function = Some((correct_name, func));
-                            // Calculate where the matched name ends
-                            let matched_len_bytes = matched_name.len();
-                            used_name_end = name_start_idx + matched_len_bytes;
-                        }
-                    }
-                }
+                let (matched_function, used_name_end) = self.find_matched_function(
+                    &mut iter,
+                    &full_name,
+                    name_start_idx,
+                    full_name_end,
+                );
 
                 if let Some((name, meta)) = matched_function {
-                    // A valid function was identified.
-                    // If a prefix match occurred (e.g., matching '$ping' within '$pingms'), 
-                    // the remaining suffix must be handled as a separate text token.
-
-                    // Note: The iterator has already advanced past the full identifier.
-                    // The function token spans from 'start' (including any modifiers like '$') 
-                    // to 'used_name_end' (the end of the matched function name).
-
-                    // 'name_start_idx' accounts for characters after modifiers. 
-                    // Since 'used_name_end' represents the absolute end position of the 
-                    // matched name, it serves as the correct boundary for the function token.
-
-                    let token_end = used_name_end;
-
-                    // parse args if any
-                    let mut args_text: Option<&str> = None;
-                    let mut args_start_offset = 0;
-
-                    // Only check for brackets/arguments if the function name was an exact match.
-                    // If a suffix exists (e.g., '$ping' matched in '$pingms'), the 'ms' suffix 
-                    // is treated as literal text, which precludes argument parsing for the prefix.
-
-                    // Note: The iterator has already consumed the full string (up to full_name_end).
-                    // While we logically "rewind" to used_name_end to emit the function token, 
-                    // the physical iterator remains ahead. A non-empty suffix effectively 
-                    // signals that this match should be treated as a no-argument call.
-
-                    let has_suffix = used_name_end < full_name_end;
-
-                    if !has_suffix {
-                        // We are at the end of the name, check for args
-                        if let Some(&(i, '[')) = iter.peek() {
-                            if let Some(end_idx) = find_matching_bracket(self.code, i) {
-                                args_text = Some(&self.code[i + 1..end_idx]);
-                                args_start_offset = i + 1;
-                                while let Some(&(j, _)) = iter.peek() {
-                                    if j <= end_idx {
-                                        iter.next();
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                last_idx = end_idx + 1;
-                            } else {
-                                if !ignore_next_line {
-                                    diagnostics.push(Diagnostic {
-                                        message: format!("Unclosed '[' for function `${}`", name),
-                                        start,
-                                        end: self.code.len(),
-                                    });
-                                }
-                                last_idx = self.code.len();
-                            }
-                        } else {
-                            last_idx = token_end;
-                        }
-                    } else {
-                        // Handle the suffix logic: The function call concludes at 'used_name_end'.
-                        // Any characters between 'used_name_end' and 'full_name_end' (the suffix) 
-                        // must be explicitly captured as text.
-
-                        // Because the main loop's iterator 'iter' is already positioned at 
-                        // 'full_name_end', simply updating 'last_idx' to 'used_name_end' would 
-                        // cause the suffix to be skipped in the next iteration.
-
-                        // To prevent data loss, we must emit the suffix as a text token immediately 
-                        // and synchronize 'last_idx' with 'full_name_end'.
-                        last_idx = full_name_end; // We have consumed up to here
-                    }
-
-                    let (min_args, max_args) = compute_arg_counts(&meta);
-                    let mut parsed_args: Option<Vec<SmallVec<[ParsedArg; 8]>>> = None;
-
-                    if let Some(inner) = args_text {
-                        // ... args parsing logic ...
-                        if meta.brackets.is_some() {
-                            match parse_nested_args(
-                                inner,
-                                &self.manager,
-                                &mut diagnostics,
-                                args_start_offset,
-                            ) {
-                                Ok(args_vec) => {
-                                    parsed_args = Some(args_vec.clone());
-                                    validate_arg_count(
-                                        &name,
-                                        args_vec.len(),
-                                        min_args,
-                                        max_args,
-                                        meta.args
-                                            .as_ref()
-                                            .map(|v| v.iter().any(|a| a.rest))
-                                            .unwrap_or(false),
-                                        &mut diagnostics,
-                                        (start, last_idx),
-                                        self.code,
-                                        ignore_next_line,
-                                    );
-
-                                    if !ignore_next_line && let Some(meta_args) = &meta.args {
-                                        validate_arg_enums(
-                                            &name,
-                                            &args_vec,
-                                            meta_args,
-                                            &self.manager,
-                                            &mut diagnostics,
-                                            start, // Use function start for now as we don't have better arg offsets
-                                            self.code,
-                                        );
-                                    }
-                                }
-                                Err(_) => {
-                                    if !ignore_next_line {
-                                        diagnostics.push(Diagnostic {
-                                            message: format!("Failed to parse args for `${name}`",),
-                                            start,
-                                            end: last_idx,
-                                        });
-                                    }
-                                }
-                            }
-                        } else if !ignore_next_line {
-                            diagnostics.push(Diagnostic {
-                                message: format!("${} does not accept brackets", name),
-                                start,
-                                end: last_idx,
-                            });
-                        }
-                    } else if meta.brackets == Some(true) && !ignore_next_line {
-                        diagnostics.push(Diagnostic {
-                            message: format!("${} expects brackets `[...]`", name),
-                            start,
-                            end: token_end,
-                        });
-                    }
-
-                    tokens.push(Token {
-                        kind: TokenKind::FunctionName,
-                        text: self.code[start..token_end].to_string(),
+                    self.handle_matched_function(
+                        &mut iter,
+                        name,
+                        meta,
                         start,
-                        end: token_end,
-                    });
-
-                    if has_suffix {
-                        tokens.push(Token {
-                            kind: TokenKind::Text,
-                            text: self.code[token_end..full_name_end].to_string(),
-                            start: token_end,
-                            end: full_name_end,
-                        });
-                    }
-
-                    if !ignore_next_line {
-                        functions.push(ParsedFunction {
-                            name: meta.name.trim_start_matches('$').to_string(),
-                            matched: self.code[start..token_end].to_string(),
-                            args: parsed_args,
-                            span: (start, if has_suffix { token_end } else { last_idx }),
-                            silent,
-                            negated,
-                            count: None,
-                            meta,
-                        });
-                    }
+                        used_name_end,
+                        full_name_end,
+                        silent,
+                        negated,
+                        &mut last_idx,
+                        &mut tokens,
+                        &mut diagnostics,
+                        &mut functions,
+                        ignore_next_line,
+                    );
                 } else {
-                    // No match found (either exact match failed, or no prefix match)
-                    if !ignore_next_line {
-                        diagnostics.push(Diagnostic {
-                            message: format!("Unknown function `${}`", full_name),
-                            start,
-                            end: full_name_end,
-                        });
-                    }
-                    tokens.push(Token {
-                        kind: TokenKind::Unknown,
-                        text: self.code[start..full_name_end].to_string(),
+                    self.handle_unknown_function_call(
+                        &mut iter,
+                        &full_name,
+                        full_name_end,
                         start,
-                        end: full_name_end,
-                    });
-                    last_idx = full_name_end;
-
-                    // Check if the unknown function has brackets and parse them recursively
-                    // This ensures that valid functions inside are found and brackets are balanced
-                    if let Some(&(i, '[')) = iter.peek() {
-                        if let Some(end_idx) = find_matching_bracket(self.code, i) {
-                            // Found matching bracket, parse content
-                            let content_start = i + 1;
-                            let content_end = end_idx;
-                            let content = &self.code[content_start..content_end];
-
-                            // Emit '[' token
-                            tokens.push(Token {
-                                kind: TokenKind::Text,
-                                text: self.code[i..i + 1].to_string(),
-                                start: i,
-                                end: i + 1,
-                            });
-
-                            // Parse content recursively
-                            let parser =
-                                ForgeScriptParser::new_internal(self.manager.clone(), content);
-                            let res = parser.parse_internal();
-
-                            // Adjust offsets and append tokens/diagnostics
-                            for token in res.tokens {
-                                tokens.push(Token {
-                                    kind: token.kind,
-                                    text: token.text,
-                                    start: token.start + content_start,
-                                    end: token.end + content_start,
-                                });
-                            }
-                            for mut diag in res.diagnostics {
-                                if !ignore_next_line {
-                                    diag.start += content_start;
-                                    diag.end += content_start;
-                                    diagnostics.push(diag);
-                                }
-                            }
-                            // Append functions found inside
-                            for mut func in res.functions {
-                                if !ignore_next_line {
-                                    func.span.0 += content_start;
-                                    func.span.1 += content_start;
-                                    functions.push(func);
-                                }
-                            }
-
-                            // Emit ']' token
-                            tokens.push(Token {
-                                kind: TokenKind::Text,
-                                text: self.code[end_idx..end_idx + 1].to_string(),
-                                start: end_idx,
-                                end: end_idx + 1,
-                            });
-
-                            // Advance iterator past the closing bracket
-                            while let Some(&(j, _)) = iter.peek() {
-                                if j <= end_idx {
-                                    iter.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            last_idx = end_idx + 1;
-                        } else {
-                            // Unclosed bracket
-                            if !ignore_next_line {
-                                diagnostics.push(Diagnostic {
-                                    message: format!(
-                                        "Unclosed '[' for unknown function `${}`",
-                                        full_name
-                                    ),
-                                    start: i,
-                                    end: self.code.len(),
-                                });
-                            }
-                            // Consume the '[' as text
-                            tokens.push(Token {
-                                kind: TokenKind::Text,
-                                text: self.code[i..i + 1].to_string(),
-                                start: i,
-                                end: i + 1,
-                            });
-                            iter.next(); // consume '['
-                            last_idx = i + 1;
-                        }
-                    }
+                        &mut last_idx,
+                        &mut tokens,
+                        &mut diagnostics,
+                        &mut functions,
+                        ignore_next_line,
+                    );
                 }
             }
         }
@@ -993,6 +458,457 @@ impl<'a> ForgeScriptParser<'a> {
             tokens,
             diagnostics,
             functions,
+        }
+    }
+
+    fn handle_backslash_escape(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        idx: usize,
+        c: char,
+        last_idx: &mut usize,
+        tokens: &mut Vec<Token>,
+    ) -> bool {
+        if c != '\\' { return false; }
+        
+        let Some(&(_next_idx, next_c)) = iter.peek() else { return false; };
+
+        // Check for backtick escape: \`
+        if next_c == '`' {
+            if *last_idx < idx {
+                tokens.push(Token {
+                    kind: TokenKind::Text,
+                    text: self.code[*last_idx..idx].to_string(),
+                    start: *last_idx,
+                    end: idx,
+                });
+            }
+            iter.next(); // consume the backtick
+            *last_idx = idx; // Start from backslash
+            return true;
+        }
+
+        // Check for double backslash escapes: \\$, \\;, \\[, \\]
+        if next_c == '\\' {
+            let mut lookahead = iter.clone();
+            lookahead.next(); // skip second backslash
+            if let Some(&(_third_idx, third_c)) = lookahead.peek() 
+                && matches!(third_c, '$' | '[' | ']' | ';' | '\\')
+            {
+                if *last_idx < idx {
+                    tokens.push(Token {
+                        kind: TokenKind::Text,
+                        text: self.code[*last_idx..idx].to_string(),
+                        start: *last_idx,
+                        end: idx,
+                    });
+                }
+                iter.next(); // consume second backslash
+                iter.next(); // consume escaped character
+                *last_idx = idx; // Start from first backslash
+                return true;
+            }
+        }
+        
+        false
+    }
+
+    fn handle_js_expression(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        start: usize,
+        brace_idx: usize,
+        last_idx: &mut usize,
+        tokens: &mut Vec<Token>,
+        diagnostics: &mut Vec<Diagnostic>,
+        ignore_next_line: bool,
+    ) -> bool {
+        let Some(end_idx) = find_matching_brace(self.code, brace_idx) else {
+            if !ignore_next_line {
+                diagnostics.push(Diagnostic {
+                    message: "Unclosed '{' for JavaScript expression `${...}`".to_string(),
+                    start,
+                    end: self.code.len(),
+                });
+            }
+            *last_idx = self.code.len();
+            return true;
+        };
+
+        let js_content = &self.code[brace_idx + 1..end_idx];
+        while let Some(&(j, _)) = iter.peek() {
+            if j <= end_idx { iter.next(); } else { break; }
+        }
+        *last_idx = end_idx + 1;
+
+        tokens.push(Token {
+            kind: TokenKind::JavaScript,
+            text: js_content.to_string(),
+            start,
+            end: *last_idx,
+        });
+        true
+    }
+
+    fn handle_escape_function(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        start: usize,
+        full_name: &str,
+        full_name_end: usize,
+        last_idx: &mut usize,
+        tokens: &mut Vec<Token>,
+        diagnostics: &mut Vec<Diagnostic>,
+        ignore_next_line: bool,
+    ) -> bool {
+        if !is_escape_function(full_name) { return false; }
+
+        if let Some(&(bracket_idx, '[')) = iter.peek() {
+            if let Some(end_idx) = find_matching_bracket_raw(self.code.as_bytes(), bracket_idx) {
+                let escaped_content = &self.code[bracket_idx + 1..end_idx];
+                while let Some(&(j, _)) = iter.peek() {
+                    if j <= end_idx { iter.next(); } else { break; }
+                }
+                *last_idx = end_idx + 1;
+                tokens.push(Token {
+                    kind: TokenKind::Escaped,
+                    text: escaped_content.to_string(),
+                    start,
+                    end: *last_idx,
+                });
+                return true;
+            }
+            if !ignore_next_line {
+                diagnostics.push(Diagnostic {
+                    message: format!("Unclosed '[' for escape function `${full_name}`"),
+                    start,
+                    end: self.code.len(),
+                });
+            }
+            *last_idx = self.code.len();
+            return true;
+        }
+
+        if !ignore_next_line {
+            diagnostics.push(Diagnostic {
+                message: format!("${full_name} expects brackets `[...]` containing content to escape"),
+                start,
+                end: full_name_end,
+            });
+        }
+        tokens.push(Token {
+            kind: TokenKind::Unknown,
+            text: self.code[start..full_name_end].to_string(),
+            start,
+            end: full_name_end,
+        });
+        *last_idx = full_name_end;
+        true
+    }
+
+    fn handle_modifiers(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+    ) -> (bool, bool) {
+        let mut silent = false;
+        let mut negated = false;
+
+        while let Some(&(_, next_c)) = iter.peek() {
+            match next_c {
+                '!' => {
+                    silent = true;
+                    iter.next();
+                }
+                '#' => {
+                    negated = true;
+                    iter.next();
+                }
+                '@' => {
+                    let mut lookahead = iter.clone();
+                    lookahead.next(); // consume '@'
+                    if let Some(&(_, '[')) = lookahead.peek() {
+                        iter.next(); // consume '@'
+                        iter.next(); // consume '['
+                        let mut depth = 1;
+                        for (_, c) in iter.by_ref() {
+                            if c == '[' { depth += 1; }
+                            else if c == ']' {
+                                depth -= 1;
+                                if depth == 0 { break; }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        (silent, negated)
+    }
+
+    fn extract_function_name(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+    ) -> (String, usize, usize) {
+        let name_start_idx = iter.peek().map(|&(i, _)| i).unwrap_or(self.code.len());
+        let mut name_chars = vec![];
+        let mut full_name_end = name_start_idx;
+
+        while let Some(&(i, ch)) = iter.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                name_chars.push(ch);
+                full_name_end = i + ch.len_utf8();
+                iter.next();
+            } else {
+                break;
+            }
+        }
+        (name_chars.iter().collect(), name_start_idx, full_name_end)
+    }
+
+    fn find_matched_function(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        full_name: &str,
+        name_start_idx: usize,
+        full_name_end: usize,
+    ) -> (Option<(String, Arc<Function>)>, usize) {
+        let has_bracket = matches!(iter.peek(), Some(&(_, '[')));
+        let lookup_key = format!("${}", full_name);
+
+        if has_bracket {
+            if let Some(func) = self.manager.get_exact(&lookup_key) {
+                let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
+                return (Some((correct_name, func)), full_name_end);
+            }
+        } else if let Some((matched_name_with_prefix, func)) = self.manager.get_with_match(&lookup_key) {
+            let matched_name = matched_name_with_prefix.strip_prefix('$').unwrap_or(&matched_name_with_prefix);
+            if full_name.to_lowercase().starts_with(matched_name) {
+                let correct_name = func.name.strip_prefix('$').unwrap_or(&func.name).to_string();
+                let used_name_end = name_start_idx + matched_name.len();
+                return (Some((correct_name, func)), used_name_end);
+            }
+        }
+
+        (None, full_name_end)
+    }
+
+    fn handle_unknown_function_call(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        full_name: &str,
+        full_name_end: usize,
+        start: usize,
+        last_idx: &mut usize,
+        tokens: &mut Vec<Token>,
+        diagnostics: &mut Vec<Diagnostic>,
+        functions: &mut Vec<ParsedFunction>,
+        ignore_next_line: bool,
+    ) {
+        if !ignore_next_line {
+            diagnostics.push(Diagnostic {
+                message: format!("Unknown function `${}`", full_name),
+                start,
+                end: full_name_end,
+            });
+        }
+        tokens.push(Token {
+            kind: TokenKind::Unknown,
+            text: self.code[start..full_name_end].to_string(),
+            start,
+            end: full_name_end,
+        });
+        *last_idx = full_name_end;
+
+        if let Some(&(i, '[')) = iter.peek() {
+            if let Some(end_idx) = find_matching_bracket(self.code, i) {
+                let content_start = i + 1;
+                let content = &self.code[content_start..end_idx];
+
+                tokens.push(Token {
+                    kind: TokenKind::Text,
+                    text: "[".to_string(),
+                    start: i,
+                    end: content_start,
+                });
+
+                let parser = ForgeScriptParser::new_internal(self.manager.clone(), content);
+                let res = parser.parse_internal();
+
+                for token in res.tokens {
+                    tokens.push(Token {
+                        kind: token.kind,
+                        text: token.text,
+                        start: token.start + content_start,
+                        end: token.end + content_start,
+                    });
+                }
+                if !ignore_next_line {
+                    for mut diag in res.diagnostics {
+                        diag.start += content_start;
+                        diag.end += content_start;
+                        diagnostics.push(diag);
+                    }
+                    for mut func in res.functions {
+                        func.span.0 += content_start;
+                        func.span.1 += content_start;
+                        functions.push(func);
+                    }
+                }
+
+                tokens.push(Token {
+                    kind: TokenKind::Text,
+                    text: "]".to_string(),
+                    start: end_idx,
+                    end: end_idx + 1,
+                });
+
+                while let Some(&(j, _)) = iter.peek() {
+                    if j <= end_idx { iter.next(); } else { break; }
+                }
+                *last_idx = end_idx + 1;
+            } else if !ignore_next_line {
+                diagnostics.push(Diagnostic {
+                    message: format!("Unclosed '[' for unknown function `${}`", full_name),
+                    start: i,
+                    end: self.code.len(),
+                });
+                tokens.push(Token {
+                    kind: TokenKind::Text,
+                    text: "[".to_string(),
+                    start: i,
+                    end: i + 1,
+                });
+                iter.next();
+                *last_idx = i + 1;
+            }
+        }
+    }
+
+    fn handle_matched_function(
+        &self,
+        iter: &mut std::iter::Peekable<std::str::CharIndices>,
+        name: String,
+        meta: Arc<Function>,
+        start: usize,
+        used_name_end: usize,
+        full_name_end: usize,
+        silent: bool,
+        negated: bool,
+        last_idx: &mut usize,
+        tokens: &mut Vec<Token>,
+        diagnostics: &mut Vec<Diagnostic>,
+        functions: &mut Vec<ParsedFunction>,
+        ignore_next_line: bool,
+    ) {
+        let token_end = used_name_end;
+        let mut args_text: Option<&str> = None;
+        let mut args_start_offset = 0;
+        let has_suffix = used_name_end < full_name_end;
+
+        if !has_suffix {
+            if let Some(&(i, '[')) = iter.peek() {
+                if let Some(end_idx) = find_matching_bracket(self.code, i) {
+                    args_text = Some(&self.code[i + 1..end_idx]);
+                    args_start_offset = i + 1;
+                    while let Some(&(j, _)) = iter.peek() {
+                        if j <= end_idx { iter.next(); } else { break; }
+                    }
+                    *last_idx = end_idx + 1;
+                } else {
+                    if !ignore_next_line {
+                        diagnostics.push(Diagnostic {
+                            message: format!("Unclosed '[' for function `${}`", name),
+                            start,
+                            end: self.code.len(),
+                        });
+                    }
+                    *last_idx = self.code.len();
+                }
+            } else {
+                *last_idx = token_end;
+            }
+        } else {
+            *last_idx = full_name_end;
+        }
+
+        let (min_args, max_args) = compute_arg_counts(&meta);
+        let mut parsed_args: Option<Vec<SmallVec<[ParsedArg; 8]>>> = None;
+
+        if let Some(inner) = args_text {
+            if meta.brackets.is_some() {
+                match parse_nested_args(inner, &self.manager, diagnostics, args_start_offset) {
+                    Ok(args_vec) => {
+                        parsed_args = Some(args_vec.clone());
+                        validate_arg_count(
+                            &name,
+                            args_vec.len(),
+                            min_args,
+                            max_args,
+                            meta.args.as_ref().map(|v| v.iter().any(|a| a.rest)).unwrap_or(false),
+                            diagnostics,
+                            (start, *last_idx),
+                            self.code,
+                            ignore_next_line,
+                        );
+
+                        if !ignore_next_line && let Some(meta_args) = &meta.args {
+                            validate_arg_enums(&name, &args_vec, meta_args, &self.manager, diagnostics, start, self.code);
+                        }
+                    }
+                    Err(_) => {
+                        if !ignore_next_line {
+                            diagnostics.push(Diagnostic {
+                                message: format!("Failed to parse args for `${name}`"),
+                                start,
+                                end: *last_idx,
+                            });
+                        }
+                    }
+                }
+            } else if !ignore_next_line {
+                diagnostics.push(Diagnostic {
+                    message: format!("${} does not accept brackets", name),
+                    start,
+                    end: *last_idx,
+                });
+            }
+        } else if meta.brackets == Some(true) && !ignore_next_line {
+            diagnostics.push(Diagnostic {
+                message: format!("${} expects brackets `[...]`", name),
+                start,
+                end: token_end,
+            });
+        }
+
+        tokens.push(Token {
+            kind: TokenKind::FunctionName,
+            text: self.code[start..token_end].to_string(),
+            start,
+            end: token_end,
+        });
+
+        if has_suffix {
+            tokens.push(Token {
+                kind: TokenKind::Text,
+                text: self.code[token_end..full_name_end].to_string(),
+                start: token_end,
+                end: full_name_end,
+            });
+        }
+
+        if !ignore_next_line {
+            functions.push(ParsedFunction {
+                name: meta.name.trim_start_matches('$').to_string(),
+                matched: self.code[start..token_end].to_string(),
+                args: parsed_args,
+                span: (start, if has_suffix { token_end } else { *last_idx }),
+                silent,
+                negated,
+                count: None,
+                meta,
+            });
         }
     }
 }
@@ -1015,23 +931,6 @@ fn compute_arg_counts(meta: &Function) -> (usize, usize) {
         meta.args.as_ref().map(|v| v.len()).unwrap_or(0)
     };
     (min, max)
-}
-
-/// Find matching bracket for escape functions - does NOT respect backslash escapes.
-/// This is used for $esc[...] and $escape[...] where we want to find the raw matching bracket.
-fn find_matching_bracket_raw(code: &str, open_idx: usize) -> Option<usize> {
-    let mut depth = 0;
-    for (i, c) in code.char_indices().skip_while(|&(i, _)| i < open_idx) {
-        if c == '[' {
-            depth += 1;
-        } else if c == ']' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-    }
-    None
 }
 
 /// Find matching brace for JavaScript expressions ${...}.
@@ -1119,59 +1018,36 @@ fn parse_nested_args(
     while char_idx < char_positions.len() {
         let (byte_idx, c) = char_positions[char_idx];
 
-        // Check if we're at an escape function
-        if c == '$' && depth == 0 {
-            // Check if this $ starts an escape function
-            let remaining = &input[byte_idx..];
-            if let Some(escape_end_relative) = find_escape_function_end(remaining, 0) {
-                // Copy the entire escape function to current including the $esc[...] structure
-                let escape_function = &remaining[..=escape_end_relative];
-                current.push_str(escape_function);
-                // Skip ahead to after the escape function
-                let target_byte = byte_idx + escape_end_relative + 1;
-                while char_idx < char_positions.len() && char_positions[char_idx].0 < target_byte {
-                    char_idx += 1;
-                }
+        // Handle escape functions ($esc[...], etc.)
+        if let Some(jump) = try_handle_escape_function_in_args(input, byte_idx, depth, &mut current) {
+            char_idx += jump;
+            is_start_of_arg = false;
+            continue;
+        }
+
+        // Handle backslash escapes
+        if c == '\\' {
+            if let Some(jump) = try_handle_backslash_escape_in_args(
+                &char_positions,
+                char_idx,
+                is_start_of_arg,
+                &mut current,
+                &mut first_char_escaped,
+            ) {
+                char_idx += jump;
                 is_start_of_arg = false;
                 continue;
             }
         }
 
         match c {
-            '\\' => {
-                // Check for backtick escape: \`
-                if char_idx + 1 < char_positions.len() && char_positions[char_idx + 1].1 == '`' {
-                    current.push('`');
-                    char_idx += 2;
-                    is_start_of_arg = false;
-                    continue;
-                }
-                // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
-                if char_idx + 2 < char_positions.len() && char_positions[char_idx + 1].1 == '\\' {
-                    let third = char_positions[char_idx + 2].1;
-                    if matches!(third, '$' | '[' | ']' | ';' | '\\') {
-                        if is_start_of_arg && third == '$' {
-                            first_char_escaped = true;
-                        }
-                        current.push(third);
-                        char_idx += 3; // Skip both backslashes and escaped char
-                        is_start_of_arg = false;
-                        continue;
-                    }
-                }
-                // Not a recognized escape, keep the backslash
-                current.push('\\');
-                char_idx += 1;
-            }
             '[' => {
                 depth += 1;
                 current.push(c);
                 char_idx += 1;
             }
             ']' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                if depth > 0 { depth -= 1; }
                 current.push(c);
                 char_idx += 1;
             }
@@ -1239,6 +1115,53 @@ fn parse_nested_args(
     }
 
     Ok(args)
+}
+
+fn try_handle_escape_function_in_args(
+    input: &str,
+    byte_idx: usize,
+    depth: i32,
+    current: &mut String,
+) -> Option<usize> {
+    if input.as_bytes().get(byte_idx) == Some(&b'$') && depth == 0 {
+        if let Some(escape_end_relative) = find_escape_function_end(&input[byte_idx..], 0) {
+            current.push_str(&input[byte_idx..=byte_idx + escape_end_relative]);
+            return Some(escape_end_relative + 1);
+        }
+    }
+    None
+}
+
+fn try_handle_backslash_escape_in_args(
+    char_positions: &[(usize, char)],
+    char_idx: usize,
+    is_start_of_arg: bool,
+    current: &mut String,
+    first_char_escaped: &mut bool,
+) -> Option<usize> {
+    // Check for backtick escape: \`
+    if let Some(&(_, next_c)) = char_positions.get(char_idx + 1) {
+        if next_c == '`' {
+            current.push('`');
+            return Some(2);
+        }
+    }
+    
+    // Check for double backslash escapes: \\$, \\;, \\[, \\], \\\\
+    if let Some(&(_, '\\')) = char_positions.get(char_idx + 1) {
+        if let Some(&(_, third)) = char_positions.get(char_idx + 2) {
+            if matches!(third, '$' | '[' | ']' | ';' | '\\') {
+                if is_start_of_arg && third == '$' {
+                    *first_char_escaped = true;
+                }
+                current.push(third);
+                return Some(3);
+            }
+        }
+    }
+    
+    current.push('\\');
+    Some(1)
 }
 
 fn parse_single_arg(

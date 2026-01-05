@@ -16,6 +16,7 @@ use regex::Regex;
 use tower_lsp::lsp_types::*;
 
 use crate::metadata::MetadataManager;
+use crate::utils::{find_matching_bracket_raw, is_escaped, offset_to_position};
 
 /// Regex for extracting code blocks from `ForgeScript` files.
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -29,76 +30,6 @@ static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// 3 = PARAMETER (alternating function color)
 /// 4 = STRING (escape function content)
 /// 5 = COMMENT (comments)
-/// Checks if a character at the given index is escaped by a backslash.
-///
-/// Handles:
-/// - Backtick escape: \` (requires 1 backslash)
-/// - Special characters ($, ;, [, ]): require 2 backslashes for escaping
-fn is_char_escaped(bytes: &[u8], idx: usize) -> bool {
-    if idx == 0 {
-        return false;
-    }
-
-    let c = bytes[idx];
-
-    // For backtick: 1 backslash
-    if c == b'`' {
-        if idx >= 1 && bytes[idx - 1] == b'\\' {
-            let mut backslash_count = 1;
-            let mut pos = idx - 1;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            return backslash_count % 2 == 1;
-        }
-        return false;
-    }
-
-    // For special chars: 2 backslashes
-    if matches!(c, b'$' | b';' | b'[' | b']') {
-        if idx >= 2 && bytes[idx - 1] == b'\\' && bytes[idx - 2] == b'\\' {
-            let mut backslash_count = 2;
-            let mut pos = idx - 2;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            return backslash_count == 2 || backslash_count % 2 == 0;
-        }
-        return false;
-    }
-
-    false
-}
-
-/// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
-///
-/// This version does not handle escape sequences and is used for raw content
-/// like comments and escape functions.
-fn find_matching_bracket_raw(code: &[u8], open_idx: usize) -> Option<usize> {
-    let mut depth = 0;
-    for (i, &byte) in code.iter().enumerate().skip(open_idx) {
-        if byte == b'[' {
-            depth += 1;
-        } else if byte == b']' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
 /// Extracts semantic tokens from `ForgeScript` source code, optionally using
 /// alternating colors for function calls.
 ///
@@ -152,15 +83,13 @@ pub fn extract_highlight_ranges(
         if let Some(match_group) = cap.get(1) {
             let content_start = match_group.start();
             let code = match_group.as_str();
-            let bytes = code.as_bytes();
-
             let char_positions: Vec<(usize, char)> = code.char_indices().collect();
             let mut idx = 0;
 
             while idx < char_positions.len() {
                 let (i, c) = char_positions[idx];
 
-                if c == '$' && !is_char_escaped(bytes, i) {
+                if c == '$' && !is_escaped(code, i) {
                     // Skip comments and escape functions as they are handled by semantic tokens
                     if try_extract_comment(code, idx, &char_positions).is_some() {
                         idx += 1;
@@ -217,7 +146,6 @@ fn extract_tokens_from_code(
     manager: &Arc<MetadataManager>,
 ) -> Vec<(usize, usize, u32)> {
     let mut found = Vec::new();
-    let bytes = code.as_bytes();
     let mut function_color_index = 0u32;
 
     // Collect char indices for safe UTF-8 iteration
@@ -228,7 +156,7 @@ fn extract_tokens_from_code(
         let (i, c) = char_positions[idx];
 
         // Check for functions
-        if c == '$' && !is_char_escaped(bytes, i) {
+        if c == '$' && !is_escaped(code, i) {
             // Check for $c[...] (comment)
             if let Some((end_idx, next_idx)) = try_extract_comment(code, idx, &char_positions) {
                 found.push((i + code_start, end_idx + 1 + code_start, 5));
@@ -282,7 +210,7 @@ fn extract_tokens_from_code(
         }
 
         // Check for semicolons
-        if c == ';' && !is_char_escaped(bytes, i) {
+        if c == ';' && !is_escaped(code, i) {
             found.push((i + code_start, i + 1 + code_start, 1));
         }
 
@@ -479,26 +407,4 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
     }
 
     tokens
-}
-
-/// Converts a byte offset within a string to an LSP Position (line and character).
-///
-/// Handles multi-byte characters and line endings.
-pub fn offset_to_position(text: &str, offset: usize) -> Position {
-    let mut line = 0u32;
-    let mut col = 0u32;
-
-    for (i, ch) in text.char_indices() {
-        if i >= offset {
-            break;
-        }
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += u32::try_from(ch.len_utf16()).expect("UTF-16 length exceeds u32");
-        }
-    }
-
-    Position::new(line, col)
 }
