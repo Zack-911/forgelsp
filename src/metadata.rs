@@ -79,6 +79,10 @@ impl Function {
                 }
                 name.push_str(&a.name);
 
+                if a.required != Some(true) || a.rest {
+                    name.push('?');
+                }
+
                 // Add type info
                 let type_str = match &a.arg_type {
                     JsonValue::String(s) => s.clone(),
@@ -93,10 +97,6 @@ impl Function {
                 if !type_str.is_empty() {
                     name.push_str(": ");
                     name.push_str(&type_str);
-                }
-
-                if a.required == Some(false) {
-                    name.push('?');
                 }
                 name
             })
@@ -1221,5 +1221,65 @@ mod tests {
         assert!(!old_path.exists());
 
         fs::remove_dir_all(cache_dir).unwrap();
+    }
+    #[test]
+    fn test_signature_label() {
+        let func = Function {
+            name: "$testFunc".to_string(),
+            version: JsonValue::String("1.0".to_string()),
+            description: "A test function".to_string(),
+            brackets: Some(true),
+            unwrap: false,
+            args: Some(vec![
+                Arg {
+                    name: "requiredArg".to_string(),
+                    description: "desc".to_string(),
+                    rest: false,
+                    required: Some(true),
+                    arg_type: JsonValue::String("Number".to_string()),
+                    condition: None,
+                    arg_enum: None,
+                    enum_name: None,
+                    pointer: None,
+                    pointer_property: None,
+                },
+                Arg {
+                    name: "optionalArg".to_string(),
+                    description: "desc".to_string(),
+                    rest: false,
+                    required: Some(false),
+                    arg_type: JsonValue::String("String".to_string()),
+                    condition: None,
+                    arg_enum: None,
+                    enum_name: None,
+                    pointer: None,
+                    pointer_property: None,
+                },
+                Arg {
+                    name: "implicitOptional".to_string(),
+                    description: "desc".to_string(),
+                    rest: false,
+                    required: None, // Implicitly optional
+                    arg_type: JsonValue::String("Boolean".to_string()),
+                    condition: None,
+                    arg_enum: None,
+                    enum_name: None,
+                    pointer: None,
+                    pointer_property: None,
+                },
+            ]),
+            output: Some(vec!["Void".to_string()]),
+            category: None,
+            aliases: None,
+            experimental: None,
+            examples: None,
+            deprecated: None,
+            extension: None,
+            source_url: None,
+        };
+
+        let label = func.signature_label();
+        // requiredArg: Number; optionalArg?: String; implicitOptional?: Boolean
+        assert_eq!(label, "$testFunc[requiredArg: Number; optionalArg?: String; implicitOptional?: Boolean]");
     }
 }

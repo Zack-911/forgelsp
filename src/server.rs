@@ -255,8 +255,24 @@ impl ForgeScriptServer {
                     name.push_str("...");
                 }
                 name.push_str(&a.name);
-                if a.required == Some(false) {
+                if a.required != Some(true) || a.rest {
                     name.push('?');
+                }
+
+                // Add type info
+                let type_str = match &a.arg_type {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(arr) => arr
+                        .iter()
+                        .map(|v| v.as_str().unwrap_or("?").to_string())
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                    _ => "Any".to_string(),
+                };
+
+                if !type_str.is_empty() {
+                    name.push_str(": ");
+                    name.push_str(&type_str);
                 }
 
                 let mut doc = a.description.clone();
