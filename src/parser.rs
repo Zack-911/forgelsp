@@ -60,7 +60,7 @@ pub struct ParsedFunction {
     #[allow(dead_code)]
     pub matched: String,
     #[allow(dead_code)]
-    pub args: Option<Vec<SmallVec<[ParsedArg; 8]>>>,
+    pub args: Option<Vec<(SmallVec<[ParsedArg; 8]>, (usize, usize))>>,
     #[allow(dead_code)]
     pub span: (usize, usize),
     #[allow(dead_code)]
@@ -71,6 +71,22 @@ pub struct ParsedFunction {
     pub count: Option<usize>,
     #[allow(dead_code)]
     pub meta: Arc<Function>,
+}
+
+impl ParsedFunction {
+    pub fn offset_spans(&mut self, offset: usize) {
+        self.span.0 += offset;
+        self.span.1 += offset;
+        if let Some(args) = &mut self.args {
+            for (arg_parts, span) in args {
+                span.0 += offset;
+                span.1 += offset;
+                for part in arg_parts {
+                    part.offset_spans(offset);
+                }
+            }
+        }
+    }
 }
 
 /// The result of parsing a ForgeScript document.
@@ -97,6 +113,14 @@ pub enum ParsedArg {
         #[allow(dead_code)]
         func: Box<ParsedFunction>,
     },
+}
+
+impl ParsedArg {
+    pub fn offset_spans(&mut self, offset: usize) {
+        if let ParsedArg::Function { func } = self {
+            func.offset_spans(offset);
+        }
+    }
 }
 
 /// Map a position in the concatenated code string back to the original block.
@@ -704,8 +728,7 @@ impl<'a> ForgeScriptParser<'a> {
                         diagnostics.push(diag);
                     }
                     for mut func in res.functions {
-                        func.span.0 += content_start;
-                        func.span.1 += content_start;
+                        func.offset_spans(content_start);
                         functions.push(func);
                     }
                 }
@@ -787,11 +810,11 @@ impl<'a> ForgeScriptParser<'a> {
         }
 
         let (min_args, max_args) = compute_arg_counts(&meta);
-        let mut parsed_args: Option<Vec<SmallVec<[ParsedArg; 8]>>> = None;
+        let mut parsed_args: Option<Vec<(SmallVec<[ParsedArg; 8]>, (usize, usize))>> = None;
 
         if let Some(inner) = args_text {
             if meta.brackets.is_some() {
-                match parse_nested_args(inner, &self.manager, diagnostics, args_start_offset) {
+                match parse_nested_args(inner, &self.manager, diagnostics, functions, args_start_offset) {
                     Ok(args_vec) => {
                         parsed_args = Some(args_vec.clone());
                         validate_arg_count(
@@ -807,7 +830,7 @@ impl<'a> ForgeScriptParser<'a> {
                         );
 
                         if !ignore_next_line && let Some(meta_args) = &meta.args {
-                            validate_arg_enums(&name, &args_vec, meta_args, &self.manager, diagnostics, start, self.code);
+                            validate_arg_enums(&name, &args_vec, meta_args, &self.manager, diagnostics, self.code);
                         }
                     }
                     Err(_) => {
@@ -908,8 +931,9 @@ fn parse_nested_args(
     input: &str,
     manager: &Arc<MetadataManager>,
     diagnostics: &mut Vec<Diagnostic>,
+    functions: &mut Vec<ParsedFunction>,
     base_offset: usize,
-) -> Result<Vec<SmallVec<[ParsedArg; 8]>>, nom::Err<()>> {
+) -> Result<Vec<(SmallVec<[ParsedArg; 8]>, (usize, usize))>, nom::Err<()>> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut depth = 0;
@@ -973,18 +997,27 @@ fn parse_nested_args(
                 if !trimmed.is_empty() {
                     // Calculate offset for the argument.
                     // We use arg_start_offset + base_offset + leading_whitespace_len.
+                    let arg_offset = base_offset + arg_start_offset + leading_whitespace_len;
+                    let arg_len = trimmed.len();
 
-                    args.push(parse_single_arg(
-                        trimmed,
-                        manager,
-                        first_char_escaped,
-                        diagnostics,
-                        base_offset + arg_start_offset + leading_whitespace_len,
+                    args.push((
+                        parse_single_arg(
+                            trimmed,
+                            manager,
+                            first_char_escaped,
+                            diagnostics,
+                            functions,
+                            arg_offset,
+                        ),
+                        (arg_offset, arg_offset + arg_len),
                     ));
                 } else {
-                    args.push(smallvec![ParsedArg::Literal {
-                        text: String::new()
-                    }]);
+                    args.push((
+                        smallvec![ParsedArg::Literal {
+                            text: String::new()
+                        }],
+                        (base_offset + arg_start_offset, base_offset + arg_start_offset),
+                    ));
                 }
                 current.clear();
                 first_char_escaped = false;
@@ -1015,17 +1048,26 @@ fn parse_nested_args(
         let trimmed = current.trim();
         let leading_whitespace_len = current.len() - current.trim_start().len();
         if !trimmed.is_empty() {
-            args.push(parse_single_arg(
-                trimmed,
-                manager,
-                first_char_escaped,
-                diagnostics,
-                base_offset + arg_start_offset + leading_whitespace_len,
+            let arg_offset = base_offset + arg_start_offset + leading_whitespace_len;
+            let arg_len = trimmed.len();
+            args.push((
+                parse_single_arg(
+                    trimmed,
+                    manager,
+                    first_char_escaped,
+                    diagnostics,
+                    functions,
+                    arg_offset,
+                ),
+                (arg_offset, arg_offset + arg_len),
             ));
         } else {
-            args.push(smallvec![ParsedArg::Literal {
-                text: String::new()
-            }]);
+            args.push((
+                smallvec![ParsedArg::Literal {
+                    text: String::new()
+                }],
+                (base_offset + arg_start_offset, base_offset + arg_start_offset),
+            ));
         }
     }
 
@@ -1111,12 +1153,13 @@ fn parse_single_arg(
     manager: &Arc<MetadataManager>,
     force_literal: bool,
     diagnostics: &mut Vec<Diagnostic>,
+    functions: &mut Vec<ParsedFunction>,
     base_offset: usize,
 ) -> SmallVec<[ParsedArg; 8]> {
     if !force_literal && input.starts_with('$') {
         // Use new_internal to parse directly without code block extraction
         let parser = ForgeScriptParser::new_internal((*manager).clone(), input);
-        let res = parser.parse_internal();
+        let mut res = parser.parse_internal();
 
         // Propagate diagnostics from the inner parser
         for mut diag in res.diagnostics {
@@ -1125,9 +1168,16 @@ fn parse_single_arg(
             diagnostics.push(diag);
         }
 
+        for func in &mut res.functions {
+            func.offset_spans(base_offset);
+            functions.push(func.clone());
+        }
+
         if let Some(f) = res.functions.first() {
+            let mut func = f.clone();
+            func.offset_spans(base_offset);
             smallvec![ParsedArg::Function {
-                func: Box::new(f.clone())
+                func: Box::new(func)
             }]
         } else {
             smallvec![ParsedArg::Literal {
@@ -1173,14 +1223,13 @@ fn validate_arg_count(
 
 fn validate_arg_enums(
     name: &str,
-    parsed_args: &[SmallVec<[ParsedArg; 8]>],
+    parsed_args: &[(SmallVec<[ParsedArg; 8]>, (usize, usize))],
     meta_args: &[crate::metadata::Arg],
     manager: &Arc<MetadataManager>,
     diagnostics: &mut Vec<Diagnostic>,
-    base_offset: usize,
     _source: &str,
 ) {
-    for (i, arg_parts) in parsed_args.iter().enumerate() {
+    for (i, (arg_parts, span)) in parsed_args.iter().enumerate() {
         // Skip validation if this specific argument is in the exception list
         if ENUM_VALIDATION_EXCEPTIONS.contains(&(name, i)) {
             continue;
@@ -1227,19 +1276,72 @@ fn validate_arg_enums(
 
                 // Case-sensitive check
                 if !values.contains(&full_text) {
-                    // Since we don't have exact offsets for individual args, we will mark the whole function call
-                    // but add a specific message.
-                    // TODO: Improve `parse_nested_args` to return spans.
                     diagnostics.push(Diagnostic {
                         message: format!(
                             "Invalid value `{}` for argument `{}` of `${}`. Expected one of: {:?}",
                             full_text, meta_arg.name, name, values
                         ),
-                        start: base_offset, // This is not ideal, it points to start of args.
-                        end: base_offset,   // We should probably pass the function span.
+                        start: span.0,
+                        end: span.1,
                     });
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::MetadataManager;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_parse_nested_args_spans() {
+        let manager = Arc::new(MetadataManager::new_test());
+        let mut diagnostics = Vec::new();
+        let mut functions = Vec::new();
+        let input = "abc; $func[def]; ghi";
+        let base_offset = 10;
+        
+        let result = parse_nested_args(input, &manager, &mut diagnostics, &mut functions, base_offset).unwrap();
+        
+        assert_eq!(result.len(), 3);
+        
+        // "abc"
+        assert_eq!(result[0].1, (10, 13));
+        
+        // "$func[def]"
+        assert_eq!(result[1].1, (15, 25));
+        
+        // "ghi"
+        assert_eq!(result[2].1, (27, 30));
+    }
+
+    #[test]
+    fn test_offset_spans() {
+        let func_meta = Arc::new(crate::metadata::Function {
+            name: "$test".to_string(),
+            ..Default::default()
+        });
+        
+        let mut func = ParsedFunction {
+            name: "test".to_string(),
+            matched: "$test".to_string(),
+            args: Some(vec![(
+                smallvec![ParsedArg::Literal { text: "arg".to_string() }],
+                (5, 8)
+            )]),
+            span: (0, 10),
+            silent: false,
+            negated: false,
+            count: None,
+            meta: func_meta,
+        };
+        
+        func.offset_spans(100);
+        
+        assert_eq!(func.span, (100, 110));
+        assert_eq!(func.args.unwrap()[0].1, (105, 108));
     }
 }

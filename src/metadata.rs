@@ -28,7 +28,7 @@ use crate::utils::Event;
 // ==============================
 
 /// Represents a ForgeScript function call with its metadata.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Function {
     /// The name of the function, including the `$` prefix.
     pub name: String,
@@ -108,7 +108,7 @@ impl Function {
 }
 
 /// Represents an argument for a ForgeScript function.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Arg {
     /// The name of the argument.
@@ -595,6 +595,11 @@ impl MetadataManager {
             events,
             file_map,
         })
+    }
+
+    #[cfg(test)]
+    pub fn new_test() -> Self {
+        Self::new("./.test_cache", vec![], None).unwrap()
     }
 
     /// Loads all metadata from the configured URLs.

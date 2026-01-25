@@ -47,6 +47,18 @@ pub struct ForgeHighlightsParams {
     pub highlights: Vec<HighlightRange>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ForgeDepthParams {
+    pub uri: Url,
+    pub depth: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CursorMovedParams {
+    pub uri: Url,
+    pub position: Position,
+}
+
 /// `ForgeScript` Language Server
 ///
 /// Maintains shared state for document content, parse results, and function metadata.
@@ -63,6 +75,7 @@ pub struct ForgeScriptServer {
     pub consistent_function_colors: Arc<RwLock<bool>>,
     pub function_colors: Arc<RwLock<Vec<String>>>,
     pub config: Arc<RwLock<Option<ForgeConfig>>>,
+    pub cursor_positions: Arc<RwLock<HashMap<Url, Position>>>,
 }
 
 impl ForgeScriptServer {
@@ -84,7 +97,8 @@ impl ForgeScriptServer {
             .insert(uri.clone(), parsed.clone());
 
         publish_diagnostics(self, &uri, &text, &parsed.diagnostics).await;
-        self.send_highlights(uri, &text).await;
+        self.send_highlights(uri.clone(), &text).await;
+        self.update_depth(uri).await;
 
         let diag_count = parsed.diagnostics.len();
         if diag_count > 0 {
@@ -109,44 +123,71 @@ impl ForgeScriptServer {
 
     /// Sends dynamic highlights notification to the client.
     pub async fn send_highlights(&self, uri: Url, text: &str) {
-        let colors = self
-            .function_colors
-            .read()
-            .expect("Server: function_colors lock poisoned")
-            .clone();
+        let highlights = {
+            let colors = self
+                .function_colors
+                .read()
+                .expect("Server: function_colors lock poisoned")
+                .clone();
 
-        if colors.is_empty() {
-            return;
-        }
+            if colors.is_empty() {
+                return;
+            }
 
-        let mgr = self
-            .manager
-            .read()
-            .expect("Server: manager lock poisoned")
-            .clone();
+            let mgr = self
+                .manager
+                .read()
+                .expect("Server: manager lock poisoned")
+                .clone();
 
-        let consistent_colors = *self
-            .consistent_function_colors
-            .read()
-            .expect("Server: consistent_function_colors lock poisoned");
+            let consistent_colors = *self
+                .consistent_function_colors
+                .read()
+                .expect("Server: consistent_function_colors lock poisoned");
 
-        let ranges = crate::semantic::extract_highlight_ranges(text, &colors, consistent_colors, &mgr);
-        let highlights = ranges
-            .into_iter()
-            .map(|(start, end, color)| {
-                let start_pos = crate::utils::offset_to_position(text, start);
-                let end_pos = crate::utils::offset_to_position(text, end);
-                HighlightRange {
-                    range: Range::new(start_pos, end_pos),
-                    color,
-                }
-            })
-            .collect();
+            let ranges = crate::semantic::extract_highlight_ranges(text, &colors, consistent_colors, &mgr);
+            ranges
+                .into_iter()
+                .map(|(start, end, color)| {
+                    let start_pos = crate::utils::offset_to_position(text, start);
+                    let end_pos = crate::utils::offset_to_position(text, end);
+                    HighlightRange {
+                        range: Range::new(start_pos, end_pos),
+                        color,
+                    }
+                })
+                .collect::<Vec<HighlightRange>>()
+        };
 
         self.client
             .send_notification::<CustomNotification>(ForgeHighlightsParams {
                 uri,
                 highlights,
+            })
+            .await;
+    }
+
+    pub async fn update_depth(&self, uri: Url) {
+        let depth = {
+            let docs = self.documents.read().expect("Server: docs lock poisoned");
+            let Some(text) = docs.get(&uri) else { return; };
+
+            let cursor_positions = self.cursor_positions.read().expect("Server: cursors lock poisoned");
+            let Some(&position) = cursor_positions.get(&uri) else { return; };
+
+            let cache = self.parsed_cache.read().expect("Server: cache lock poisoned");
+            let Some(parsed) = cache.get(&uri) else { return; };
+
+            let offset = position_to_offset(text, position).unwrap_or(0);
+            parsed.functions.iter()
+                .filter(|f| offset >= f.span.0 && offset <= f.span.1)
+                .count()
+        };
+
+        self.client
+            .send_notification::<DepthNotification>(ForgeDepthParams {
+                uri,
+                depth,
             })
             .await;
     }
@@ -403,6 +444,12 @@ impl tower_lsp::lsp_types::notification::Notification for CustomNotification {
     const METHOD: &'static str = "forge/highlights";
 }
 
+struct DepthNotification;
+impl tower_lsp::lsp_types::notification::Notification for DepthNotification {
+    type Params = ForgeDepthParams;
+    const METHOD: &'static str = "forge/updateDepth";
+}
+
 
 
 /// Returns the server capabilities for this LSP.
@@ -446,6 +493,10 @@ fn build_capabilities() -> ServerCapabilities {
                 full: Some(SemanticTokensFullOptions::Bool(true)),
             },
         )),
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: vec!["forge/cursorMoved".to_string()],
+            ..Default::default()
+        }),
         workspace: Some(WorkspaceServerCapabilities {
             workspace_folders: Some(WorkspaceFoldersServerCapabilities {
                 supported: Some(true),
@@ -744,6 +795,21 @@ impl LanguageServer for ForgeScriptServer {
             result_id: None,
             data: tokens,
         })))
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+        if params.command == "forge/cursorMoved" {
+            if let Some(args) = params.arguments.get(0) {
+                if let Ok(moved_params) = serde_json::from_value::<CursorMovedParams>(args.clone()) {
+                    {
+                        let mut cursors = self.cursor_positions.write().expect("Server: cursors lock poisoned");
+                        cursors.insert(moved_params.uri.clone(), moved_params.position);
+                    }
+                    self.update_depth(moved_params.uri).await;
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {

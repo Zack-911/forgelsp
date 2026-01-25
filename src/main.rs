@@ -94,6 +94,7 @@ async fn main() {
             consistent_function_colors: Arc::new(RwLock::new(consistent)),
             function_colors: Arc::new(RwLock::new(colors)),
             config: config_wrapped,
+            cursor_positions: Arc::new(RwLock::new(HashMap::new())),
         }
     });
 
