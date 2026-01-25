@@ -951,12 +951,18 @@ fn parse_nested_args(
 
         match c {
             '[' => {
-                depth += 1;
+                // Only increment depth if this bracket is not escaped
+                if !is_escaped_bracket_in_args(&char_positions, char_idx) {
+                    depth += 1;
+                }
                 current.push(c);
                 char_idx += 1;
             }
             ']' => {
-                if depth > 0 { depth -= 1; }
+                // Only decrement depth if this bracket is not escaped
+                if depth > 0 && !is_escaped_bracket_in_args(&char_positions, char_idx) {
+                    depth -= 1;
+                }
                 current.push(c);
                 char_idx += 1;
             }
@@ -1026,6 +1032,33 @@ fn parse_nested_args(
     Ok(args)
 }
 
+/// Checks if a bracket at the given position is escaped (preceded by exactly two backslashes).
+/// This is used during structural bracket matching to ensure escaped brackets don't affect depth.
+pub(crate) fn is_escaped_bracket_in_args(char_positions: &[(usize, char)], char_idx: usize) -> bool {
+    // Check if current char is [ or ]
+    if char_idx >= char_positions.len() {
+        return false;
+    }
+    let (_byte_idx, c) = char_positions[char_idx];
+    if c != '[' && c != ']' {
+        return false;
+    }
+    
+    // Check if preceded by exactly two backslashes (ForgeScript escape: \\[ or \\])
+    if char_idx < 2 {
+        return false;
+    }
+    
+    if let (Some(&(_, c1)), Some(&(_, c2))) = 
+        (char_positions.get(char_idx - 2), char_positions.get(char_idx - 1)) 
+    {
+        c1 == '\\' && c2 == '\\'
+    } else {
+        false
+    }
+}
+
+
 fn try_handle_escape_function_in_args(
     input: &str,
     byte_idx: usize,
@@ -1044,13 +1077,14 @@ fn try_handle_escape_function_in_args(
 fn try_handle_backslash_escape_in_args(
     char_positions: &[(usize, char)],
     char_idx: usize,
-    is_start_of_arg: bool,
+    _is_start_of_arg: bool,
     current: &mut String,
-    first_char_escaped: &mut bool,
+    _first_char_escaped: &mut bool,
 ) -> Option<usize> {
     // Check for backtick escape: \`
     if let Some(&(_, next_c)) = char_positions.get(char_idx + 1) {
         if next_c == '`' {
+            current.push('\\');
             current.push('`');
             return Some(2);
         }
@@ -1060,9 +1094,8 @@ fn try_handle_backslash_escape_in_args(
     if let Some(&(_, '\\')) = char_positions.get(char_idx + 1) {
         if let Some(&(_, third)) = char_positions.get(char_idx + 2) {
             if matches!(third, '$' | '[' | ']' | ';' | '\\') {
-                if is_start_of_arg && third == '$' {
-                    *first_char_escaped = true;
-                }
+                current.push('\\');
+                current.push('\\');
                 current.push(third);
                 return Some(3);
             }

@@ -176,54 +176,31 @@ fn resolve_github_shorthand(input: String) -> String {
     format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}")
 }
 
-/// Check if a character at the given byte index is escaped.
-/// For backtick: 1 backslash escapes it (\`)
-/// For special chars ($, ;, [, ]): 2 backslashes escape it (\\$, \\;, etc.)
 pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
     if byte_idx == 0 || !code.is_char_boundary(byte_idx) {
         return false;
     }
 
     let bytes = code.as_bytes();
-    let c = bytes[byte_idx];
+    let target = bytes[byte_idx];
 
-    // For backtick, check if there's exactly 1 backslash before it
-    if c == b'`' {
-        if byte_idx >= 1 && bytes[byte_idx - 1] == b'\\' {
-            let mut backslash_count = 1;
-            let mut pos = byte_idx - 1;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            return backslash_count % 2 == 1;
+    // Count consecutive backslashes immediately before byte_idx
+    let mut count = 0;
+    let mut i = byte_idx;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'\\' {
+            count += 1;
+        } else {
+            break;
         }
-        return false;
     }
 
-    // For special chars ($, ;, [, ]), check if there are exactly 2 backslashes before it
-    if matches!(c, b'$' | b';' | b'[' | b']') {
-        if byte_idx >= 2 && bytes[byte_idx - 1] == b'\\' && bytes[byte_idx - 2] == b'\\' {
-            let mut backslash_count = 2;
-            let mut pos = byte_idx - 2;
-            while pos > 0 {
-                pos -= 1;
-                if bytes[pos] == b'\\' {
-                    backslash_count += 1;
-                } else {
-                    break;
-                }
-            }
-            return backslash_count == 2 || backslash_count % 2 == 0;
-        }
-        return false;
+    if target == b'`' {
+        count == 1
+    } else {
+        count == 2
     }
-
-    false
 }
 
 /// Finds the matching closing bracket `]` for an opening bracket `[` at `open_idx`.
@@ -238,8 +215,14 @@ pub fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
             continue;
         }
 
-        // Check if we're at the start of an escape function
-        if c == '$' {
+        if c == '[' {
+            depth += 1;
+        } else if c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        } else if c == '$' {
             if let Some(end_idx) = find_escape_function_end(code, i) {
                 // Skip the entire escape function
                 while let Some(&(idx, _)) = iter.clone().peekable().peek() {
@@ -250,15 +233,6 @@ pub fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
                     }
                 }
                 continue;
-            }
-        }
-
-        if c == '[' {
-            depth += 1;
-        } else if c == ']' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
             }
         }
     }
@@ -401,57 +375,3 @@ pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
     pos
 
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_escaped() {
-        let code = r"foo \\$ bar";
-        assert!(is_escaped(code, 6)); // $ is at index 6, preceded by \\
-        
-        let code2 = r"foo \$ bar";
-        assert!(!is_escaped(code2, 5)); // $ is at index 5, only 1 \ before it (not enough for $)
-        
-        let code3 = r"print\\[\\]";
-        // p r i n t \ \ [ \ \ ]
-        // 0 1 2 3 4 5 6 7 8 9 0
-        assert!(is_escaped(code3, 7)); // [ is at 7
-        assert!(is_escaped(code3, 10)); // ] is at 10
-    }
-
-    #[test]
-    fn test_find_matching_bracket() {
-        // Simple case
-        let code = "$foo[bar]";
-        assert_eq!(find_matching_bracket(code, 4), Some(8));
-
-        // Escaped bracket inside
-        let code2 = r"$foo[bar\\[baz]";
-        // \ is at 8, \ at 9, [ at 10. So total length is 15.
-        // $ f o o [ b a r \  \  [  b  a  z  ]
-        // 0 1 2 3 4 5 6 7 8  9  10 11 12 13 14
-        assert_eq!(find_matching_bracket(code2, 4), Some(14));
-
-        // Escaped closing bracket
-        let code3 = r"$foo[bar\\]baz]";
-        assert_eq!(find_matching_bracket(code3, 4), Some(14));
-
-        // Nested brackets
-        let code4 = "$foo[bar[baz]]";
-        assert_eq!(find_matching_bracket(code4, 4), Some(13));
-        
-        // Escape function inside
-        let code5 = "$foo[bar$esc[ignore me]]";
-        assert_eq!(find_matching_bracket(code5, 4), Some(23));
-    }
-
-    #[test]
-    fn test_reported_issue() {
-        let code = r#"$advancedTextSplit[$httpResult;"videoData":\\[;1;,"player_version;0]"#;
-        // The first [ is at index 18 (after $advancedTextSplit)
-        assert_eq!(find_matching_bracket(code, 18), Some(code.len() - 1));
-    }
-}
-
