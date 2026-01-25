@@ -175,13 +175,8 @@ impl ForgeScriptServer {
             let cursor_positions = self.cursor_positions.read().expect("Server: cursors lock poisoned");
             let Some(&position) = cursor_positions.get(&uri) else { return; };
 
-            let cache = self.parsed_cache.read().expect("Server: cache lock poisoned");
-            let Some(parsed) = cache.get(&uri) else { return; };
-
             let offset = position_to_offset(text, position).unwrap_or(0);
-            parsed.functions.iter()
-                .filter(|f| offset >= f.span.0 && offset <= f.span.1)
-                .count()
+            crate::utils::calculate_depth(text, offset)
         };
 
         self.client

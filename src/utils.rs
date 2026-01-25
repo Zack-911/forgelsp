@@ -375,3 +375,64 @@ pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
     pos
 
 }
+/// Calculates the nesting depth at a given byte offset by counting unclosed, non-escaped brackets.
+pub fn calculate_depth(text: &str, offset: usize) -> usize {
+    let mut current_depth = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    
+    for (byte_idx, c) in chars {
+        if byte_idx >= offset {
+            break;
+        }
+
+        if !is_escaped(text, byte_idx) {
+            if c == '[' {
+                current_depth += 1;
+            } else if c == ']' {
+                if current_depth > 0 {
+                    current_depth -= 1;
+                }
+            }
+        }
+    }
+    current_depth
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_depth() {
+        let text = "hello\n$if[depth 1]\n$if[depth 1;\n  $ban[depth 2]\n  $if[depth 2;\n    $if[depth 3]\n  ]\n]";
+        
+        // "hello" -> depth 0
+        assert_eq!(calculate_depth(text, 5), 0);
+        
+        // Inside first $if -> depth 1
+        let offset_depth1 = text.find("depth 1").unwrap();
+        assert_eq!(calculate_depth(text, offset_depth1), 1);
+        
+        // Inside $ban -> depth 2
+        let offset_depth2 = text.find("depth 2").unwrap();
+        assert_eq!(calculate_depth(text, offset_depth2), 2);
+        
+        // Inside innermost $if -> depth 3
+        let offset_depth3 = text.find("depth 3").unwrap();
+        assert_eq!(calculate_depth(text, offset_depth3), 3);
+    }
+
+    #[test]
+    fn test_calculate_depth_escapes() {
+        let text = r#"depth 0 \\[ depth 0 [depth 1] depth 0"#;
+        
+        // Inside escaped bracket -> depth 0
+        let offset1 = text.find("depth 0 [").unwrap() + 8;
+        assert_eq!(calculate_depth(text, offset1), 0);
+        
+        // Inside normal bracket -> depth 1
+        let offset2 = text.find("depth 1").unwrap();
+        assert_eq!(calculate_depth(text, offset2), 1);
+    }
+}
+
