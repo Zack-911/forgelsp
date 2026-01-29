@@ -453,6 +453,7 @@ fn build_capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
             trigger_characters: Some(vec!["$".into(), ".".into()]),
@@ -758,6 +759,44 @@ impl LanguageServer for ForgeScriptServer {
         }
 
         Ok(None)
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> Result<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri;
+
+        let parsed_cache = self.parsed_cache.read().expect("Server: parsed_cache lock poisoned");
+        let Some(parsed) = parsed_cache.get(&uri) else {
+            return Ok(None);
+        };
+
+        let docs = self.documents.read().expect("Server: documents lock poisoned");
+        let Some(text) = docs.get(&uri) else {
+            return Ok(None);
+        };
+
+        let mut ranges = Vec::new();
+
+        for func in &parsed.functions {
+            let start_pos = crate::utils::offset_to_position(text, func.span.0);
+            let end_pos = crate::utils::offset_to_position(text, func.span.1);
+
+            // Only add range if it spans multiple lines
+            if start_pos.line < end_pos.line {
+                ranges.push(FoldingRange {
+                    start_line: start_pos.line,
+                    start_character: Some(start_pos.character),
+                    end_line: end_pos.line,
+                    end_character: Some(end_pos.character),
+                    kind: Some(FoldingRangeKind::Region),
+                    collapsed_text: Some(func.name.clone()),
+                });
+            }
+        }
+
+        Ok(Some(ranges))
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

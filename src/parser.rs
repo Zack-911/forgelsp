@@ -703,6 +703,27 @@ impl<'a> ForgeScriptParser<'a> {
                 let content_start = i + 1;
                 let content = &self.code[content_start..end_idx];
 
+                if !ignore_next_line {
+                    // Create a dummy meta for unknown functions to allow folding/hover
+                    let dummy_meta = Arc::new(crate::metadata::Function {
+                        name: format!("${full_name}"),
+                        description: format!("Unknown function `${full_name}`"),
+                        brackets: Some(true),
+                        ..Default::default()
+                    });
+
+                    functions.push(ParsedFunction {
+                        name: full_name.to_string(),
+                        matched: full_name.to_string(),
+                        args: None, // We'll parse nested functions but not structure the unknown's args
+                        span: (start, end_idx + 1),
+                        silent: false,
+                        negated: false,
+                        count: None,
+                        meta: dummy_meta,
+                    });
+                }
+
                 tokens.push(Token {
                     kind: TokenKind::Text,
                     text: "[".to_string(),

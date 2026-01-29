@@ -1293,6 +1293,8 @@ mod tests {
             deprecated: None,
             extension: None,
             source_url: None,
+            local_path: None,
+            line: None,
         };
 
         let label = func.signature_label();
