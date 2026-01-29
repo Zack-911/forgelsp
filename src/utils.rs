@@ -58,6 +58,8 @@ pub struct CustomFunction {
     pub alias: Option<Vec<String>>,
     #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
+    pub line: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

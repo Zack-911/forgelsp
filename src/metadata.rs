@@ -61,6 +61,12 @@ pub struct Function {
     /// The source URL where this function was loaded from.
     #[serde(skip)]
     pub source_url: Option<String>,
+    /// The local file path for custom functions.
+    #[serde(skip)]
+    pub local_path: Option<PathBuf>,
+    /// The line number where this function is defined.
+    #[serde(skip)]
+    pub line: Option<u32>,
 }
 
 impl Function {
@@ -805,7 +811,10 @@ impl MetadataManager {
             .captures_iter(content)
             .map(|c| {
                 let m = c.get(0).unwrap();
-                (m.start(), m.end(), c[1].to_string())
+                let name_start = m.start();
+                // Calculate line number (0-indexed)
+                let line = content[..name_start].chars().filter(|&c| c == '\n').count() as u32;
+                (name_start, m.end(), c[1].to_string(), line)
             })
             .collect();
 
@@ -835,10 +844,10 @@ impl MetadataManager {
 
         // 3. Filter names that are NOT inside any params range
         let mut filtered_names = Vec::new();
-        for (start, end_pos, name) in &name_matches {
+        for (start, end_pos, name, line) in &name_matches {
             let is_nested = params_ranges.iter().any(|r| r.contains(start));
             if !is_nested {
-                filtered_names.push((*start, *end_pos, name.clone()));
+                filtered_names.push((*start, *end_pos, name.clone(), *line));
             }
         }
 
@@ -861,7 +870,7 @@ impl MetadataManager {
             .expect("MetadataManager: regex compile failed");
 
         for i in 0..filtered_names.len() {
-            let (_start, end_pos, name) = &filtered_names[i];
+            let (_start, end_pos, name, line) = &filtered_names[i];
             let chunk_end = if i + 1 < filtered_names.len() {
                 filtered_names[i + 1].0
             } else {
@@ -992,6 +1001,7 @@ impl MetadataManager {
                 brackets,
                 alias: None,
                 path: Some(file_path.to_string()),
+                line: Some(*line),
             });
         }
 
@@ -1118,6 +1128,8 @@ impl MetadataManager {
                 deprecated: None,
                 extension: None,
                 source_url: None,
+                local_path: custom.path.as_ref().map(PathBuf::from),
+                line: custom.line,
             };
 
             // Insert the main function

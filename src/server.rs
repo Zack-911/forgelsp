@@ -452,6 +452,7 @@ fn build_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
             trigger_characters: Some(vec!["$".into(), ".".into()]),
@@ -647,6 +648,116 @@ impl LanguageServer for ForgeScriptServer {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         handle_hover(self, params).await
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let text = {
+            let docs = self.documents.read().expect("Server: documents lock poisoned");
+            match docs.get(&uri) {
+                Some(t) => t.clone(),
+                _ => return Ok(None),
+            }
+        };
+
+        let offset = match position_to_offset(&text, position) {
+            Some(o) => o,
+            _ => return Ok(None),
+        };
+
+        // Reuse is_ident_char from hover.rs logic or define here
+        let is_ident_char = |c: char| {
+            c.is_alphanumeric()
+                || c == '_'
+                || c == '.'
+                || c == '$'
+                || c == '!'
+                || c == '#'
+                || c == '@'
+                || c == '['
+                || c == ']'
+        };
+
+        let indices: Vec<(usize, char)> = text.char_indices().collect();
+        let mut current_char_idx = indices.len();
+        for (idx, (byte_pos, _)) in indices.iter().enumerate() {
+            if *byte_pos >= offset {
+                current_char_idx = idx;
+                break;
+            }
+        }
+
+        let mut start_char_idx = current_char_idx;
+        while start_char_idx > 0 {
+            let (byte_pos, c) = indices[start_char_idx - 1];
+            if is_ident_char(c) {
+                if c == '$' && !crate::utils::is_escaped(&text, byte_pos) {
+                    start_char_idx -= 1;
+                    break;
+                }
+                start_char_idx -= 1;
+            } else {
+                break;
+            }
+        }
+
+        let mut end_char_idx = current_char_idx;
+        while end_char_idx < indices.len() {
+            let (byte_pos, c) = indices[end_char_idx];
+            if is_ident_char(c) {
+                if c == '$' && !crate::utils::is_escaped(&text, byte_pos) && end_char_idx > start_char_idx {
+                    break;
+                }
+                end_char_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        if start_char_idx >= end_char_idx {
+            return Ok(None);
+        }
+
+        let start_byte = indices[start_char_idx].0;
+        let end_byte = if end_char_idx < indices.len() {
+            indices[end_char_idx].0
+        } else {
+            text.len()
+        };
+
+        let raw_token = text[start_byte..end_byte].to_string();
+        let mut clean_token = raw_token.clone();
+
+        if clean_token.starts_with('$') {
+            let modifier_end_idx = crate::utils::skip_modifiers(&clean_token, 1);
+            if modifier_end_idx > 1 {
+                let after_modifiers = &clean_token[modifier_end_idx..];
+                if !after_modifiers.is_empty() {
+                    clean_token = format!("${after_modifiers}");
+                }
+            }
+        }
+
+        let mgr = self.manager.read().expect("Server: manager lock poisoned");
+        if let Some(func) = mgr.get(&clean_token) {
+            if let (Some(path), Some(line)) = (&func.local_path, func.line) {
+                let target_uri = Url::from_file_path(path).map_err(|_| {
+                    tower_lsp::jsonrpc::Error::invalid_params("Invalid file path for definition")
+                })?;
+                
+                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                    uri: target_uri,
+                    range: Range::new(Position::new(line, 0), Position::new(line, 0)),
+                })));
+            }
+        }
+
+        Ok(None)
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
