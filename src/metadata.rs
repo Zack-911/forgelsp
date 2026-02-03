@@ -819,8 +819,8 @@ impl MetadataManager {
             .collect();
 
         // 2. Find all "params: [" positions and their matching "]"
-        let params_start_re =
-            regex::Regex::new(r#"params:\s*\["#).expect("MetadataManager: regex compile failed");
+        let params_start_re = regex::Regex::new(r#"(?:params|args):\s*\["#)
+            .expect("MetadataManager: regex compile failed");
         let mut params_ranges = Vec::new();
         for m in params_start_re.find_iter(content) {
             let start = m.start();
