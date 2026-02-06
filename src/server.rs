@@ -21,14 +21,14 @@ use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
 use crate::semantic::extract_semantic_tokens_with_colors;
-use crate::utils::{ForgeConfig, load_forge_config_full, position_to_offset, spawn_log};
+use crate::utils::{load_forge_config_full, position_to_offset, spawn_log, ForgeConfig};
 use regex::Regex;
-use tower_lsp::Client;
-use tower_lsp::LanguageServer;
 use tower_lsp::async_trait;
 use tower_lsp::jsonrpc::Result;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
+use tower_lsp::Client;
+use tower_lsp::LanguageServer;
 
 /// Regex for identifying `ForgeScript` functions in signature help.
 static SIGNATURE_FUNC_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -119,8 +119,6 @@ impl ForgeScriptServer {
         mgr.function_count()
     }
 
-
-
     /// Sends dynamic highlights notification to the client.
     pub async fn send_highlights(&self, uri: Url, text: &str) {
         let highlights = {
@@ -145,7 +143,8 @@ impl ForgeScriptServer {
                 .read()
                 .expect("Server: consistent_function_colors lock poisoned");
 
-            let ranges = crate::semantic::extract_highlight_ranges(text, &colors, consistent_colors, &mgr);
+            let ranges =
+                crate::semantic::extract_highlight_ranges(text, &colors, consistent_colors, &mgr);
             ranges
                 .into_iter()
                 .map(|(start, end, color)| {
@@ -160,30 +159,31 @@ impl ForgeScriptServer {
         };
 
         self.client
-            .send_notification::<CustomNotification>(ForgeHighlightsParams {
-                uri,
-                highlights,
-            })
+            .send_notification::<CustomNotification>(ForgeHighlightsParams { uri, highlights })
             .await;
     }
 
     pub async fn update_depth(&self, uri: Url) {
         let depth = {
             let docs = self.documents.read().expect("Server: docs lock poisoned");
-            let Some(text) = docs.get(&uri) else { return; };
+            let Some(text) = docs.get(&uri) else {
+                return;
+            };
 
-            let cursor_positions = self.cursor_positions.read().expect("Server: cursors lock poisoned");
-            let Some(&position) = cursor_positions.get(&uri) else { return; };
+            let cursor_positions = self
+                .cursor_positions
+                .read()
+                .expect("Server: cursors lock poisoned");
+            let Some(&position) = cursor_positions.get(&uri) else {
+                return;
+            };
 
             let offset = position_to_offset(text, position).unwrap_or(0);
             crate::utils::calculate_depth(text, offset)
         };
 
         self.client
-            .send_notification::<DepthNotification>(ForgeDepthParams {
-                uri,
-                depth,
-            })
+            .send_notification::<DepthNotification>(ForgeDepthParams { uri, depth })
             .await;
     }
 
@@ -349,6 +349,7 @@ impl ForgeScriptServer {
         &self,
         f: Arc<crate::metadata::Function>,
         modifier: &str,
+        range: Range,
     ) -> CompletionItem {
         let base = f.name.clone();
         let name = if !modifier.is_empty() && base.starts_with('$') {
@@ -362,16 +363,19 @@ impl ForgeScriptServer {
         CompletionItem {
             label: name.clone(),
             kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some(f.extension.clone().unwrap_or_else(|| {
-                f.category
-                    .clone()
-                    .unwrap_or_else(|| "Function".to_string())
-            })),
+            detail: Some(
+                f.extension.clone().unwrap_or_else(|| {
+                    f.category.clone().unwrap_or_else(|| "Function".to_string())
+                }),
+            ),
             documentation: Some(Documentation::MarkupContent(MarkupContent {
                 kind: MarkupKind::Markdown,
                 value: md,
             })),
-            insert_text: Some(name),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                range,
+                new_text: name,
+            })),
             filter_text: Some(base),
             ..Default::default()
         }
@@ -444,8 +448,6 @@ impl tower_lsp::lsp_types::notification::Notification for DepthNotification {
     type Params = ForgeDepthParams;
     const METHOD: &'static str = "forge/updateDepth";
 }
-
-
 
 /// Returns the server capabilities for this LSP.
 fn build_capabilities() -> ServerCapabilities {
@@ -659,7 +661,10 @@ impl LanguageServer for ForgeScriptServer {
         let position = params.text_document_position_params.position;
 
         let text = {
-            let docs = self.documents.read().expect("Server: documents lock poisoned");
+            let docs = self
+                .documents
+                .read()
+                .expect("Server: documents lock poisoned");
             match docs.get(&uri) {
                 Some(t) => t.clone(),
                 _ => return Ok(None),
@@ -711,7 +716,10 @@ impl LanguageServer for ForgeScriptServer {
         while end_char_idx < indices.len() {
             let (byte_pos, c) = indices[end_char_idx];
             if is_ident_char(c) {
-                if c == '$' && !crate::utils::is_escaped(&text, byte_pos) && end_char_idx > start_char_idx {
+                if c == '$'
+                    && !crate::utils::is_escaped(&text, byte_pos)
+                    && end_char_idx > start_char_idx
+                {
                     break;
                 }
                 end_char_idx += 1;
@@ -750,7 +758,7 @@ impl LanguageServer for ForgeScriptServer {
                 let target_uri = Url::from_file_path(path).map_err(|_| {
                     tower_lsp::jsonrpc::Error::invalid_params("Invalid file path for definition")
                 })?;
-                
+
                 return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                     uri: target_uri,
                     range: Range::new(Position::new(line, 0), Position::new(line, 0)),
@@ -761,18 +769,21 @@ impl LanguageServer for ForgeScriptServer {
         Ok(None)
     }
 
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> Result<Option<Vec<FoldingRange>>> {
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri;
 
-        let parsed_cache = self.parsed_cache.read().expect("Server: parsed_cache lock poisoned");
+        let parsed_cache = self
+            .parsed_cache
+            .read()
+            .expect("Server: parsed_cache lock poisoned");
         let Some(parsed) = parsed_cache.get(&uri) else {
             return Ok(None);
         };
 
-        let docs = self.documents.read().expect("Server: documents lock poisoned");
+        let docs = self
+            .documents
+            .read()
+            .expect("Server: documents lock poisoned");
         let Some(text) = docs.get(&uri) else {
             return Ok(None);
         };
@@ -810,12 +821,15 @@ impl LanguageServer for ForgeScriptServer {
             .expect("Server: documents lock poisoned");
         let text = docs.get(&uri);
 
-        let Some(text) = text else { return Ok(None); };
+        let Some(text) = text else {
+            return Ok(None);
+        };
 
         let lines: Vec<&str> = text.lines().collect();
         let line = lines.get(position.line as usize).unwrap_or(&"");
 
-        let byte_offset = position_to_offset(line, Position::new(0, position.character)).unwrap_or(line.len());
+        let byte_offset =
+            position_to_offset(line, Position::new(0, position.character)).unwrap_or(line.len());
         let before_cursor = &line[..byte_offset];
 
         let Some(last_dollar_idx) = before_cursor.rfind('$') else {
@@ -831,11 +845,21 @@ impl LanguageServer for ForgeScriptServer {
             modifier = ".";
         }
 
-        let mgr = self.manager.read().expect("Server: manager lock poisoned").clone();
+        let mut start_char = 0;
+        for c in line[..last_dollar_idx].chars() {
+            start_char += c.len_utf16() as u32;
+        }
+        let range = Range::new(Position::new(position.line, start_char), position);
+
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let items: Vec<CompletionItem> = mgr
             .all_functions()
             .into_iter()
-            .map(|f| self.build_completion_item(f, modifier))
+            .map(|f| self.build_completion_item(f, modifier, range))
             .collect();
 
         spawn_log(
@@ -856,17 +880,27 @@ impl LanguageServer for ForgeScriptServer {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let docs = self.documents.read().expect("Server: documents lock poisoned");
-        let Some(text) = docs.get(&uri) else { return Ok(None); };
+        let docs = self
+            .documents
+            .read()
+            .expect("Server: documents lock poisoned");
+        let Some(text) = docs.get(&uri) else {
+            return Ok(None);
+        };
 
         let text_up_to_cursor = self.get_text_up_to_cursor(text, position);
-        let Some((func_name, open_index)) = self.find_active_function_call(&text_up_to_cursor) else {
+        let Some((func_name, open_index)) = self.find_active_function_call(&text_up_to_cursor)
+        else {
             return Ok(None);
         };
 
         let param_index = self.compute_active_param_index(&text_up_to_cursor[open_index + 1..]);
 
-        let mgr = self.manager.read().expect("Server: manager lock poisoned").clone();
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
         let lookup = format!("${func_name}");
 
         if let Some(func) = mgr.get(&lookup) {
@@ -942,12 +976,19 @@ impl LanguageServer for ForgeScriptServer {
         })))
     }
 
-    async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<serde_json::Value>> {
+    async fn execute_command(
+        &self,
+        params: ExecuteCommandParams,
+    ) -> Result<Option<serde_json::Value>> {
         if params.command == "forge/cursorMoved" {
             if let Some(args) = params.arguments.get(0) {
-                if let Ok(moved_params) = serde_json::from_value::<CursorMovedParams>(args.clone()) {
+                if let Ok(moved_params) = serde_json::from_value::<CursorMovedParams>(args.clone())
+                {
                     {
-                        let mut cursors = self.cursor_positions.write().expect("Server: cursors lock poisoned");
+                        let mut cursors = self
+                            .cursor_positions
+                            .write()
+                            .expect("Server: cursors lock poisoned");
                         cursors.insert(moved_params.uri.clone(), moved_params.position);
                     }
                     self.update_depth(moved_params.uri).await;
@@ -958,50 +999,56 @@ impl LanguageServer for ForgeScriptServer {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-    let manager_outer = self.manager.read().expect("Server: manager lock poisoned").clone();
-    let manager = manager_outer.as_ref();
+        let manager_outer = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
+        let manager = manager_outer.as_ref();
 
-    let config_guard = self.config.read().expect("Server: config lock poisoned");
-    let workspace_folders = self.workspace_folders.read().expect("Server: workspace lock poisoned");
+        let config_guard = self.config.read().expect("Server: config lock poisoned");
+        let workspace_folders = self
+            .workspace_folders
+            .read()
+            .expect("Server: workspace lock poisoned");
 
-    // Get the raw string from config (e.g., "custom_logic")
-    let relative_custom_path = config_guard
-        .as_ref()
-        .and_then(|c| c.custom_functions_path.as_ref());
+        // Get the raw string from config (e.g., "custom_logic")
+        let relative_custom_path = config_guard
+            .as_ref()
+            .and_then(|c| c.custom_functions_path.as_ref());
 
-    for change in params.changes {
-        if let Ok(path) = change.uri.to_file_path() {
-            
-            // Validate if the file is in the custom folder
-            let mut is_in_custom_folder = false;
-            
-            if let Some(rel_path) = relative_custom_path {
-                for root in workspace_folders.iter() {
-                    // Combine workspace root + relative config path
-                    let full_allowed_dir = root.join(rel_path);
-                    
-                    // Use starts_with on the absolute paths
-                    if path.starts_with(&full_allowed_dir) {
-                        is_in_custom_folder = true;
-                        break;
+        for change in params.changes {
+            if let Ok(path) = change.uri.to_file_path() {
+                // Validate if the file is in the custom folder
+                let mut is_in_custom_folder = false;
+
+                if let Some(rel_path) = relative_custom_path {
+                    for root in workspace_folders.iter() {
+                        // Combine workspace root + relative config path
+                        let full_allowed_dir = root.join(rel_path);
+
+                        // Use starts_with on the absolute paths
+                        if path.starts_with(&full_allowed_dir) {
+                            is_in_custom_folder = true;
+                            break;
+                        }
                     }
                 }
-            }
 
-            if !is_in_custom_folder {
-                continue;
-            }
+                if !is_in_custom_folder {
+                    continue;
+                }
 
-            // Only process .js or .ts files
-            let extension = path.extension().and_then(|s| s.to_str());
-            if !matches!(extension, Some("js") | Some("ts")) {
-                continue;
-            }
+                // Only process .js or .ts files
+                let extension = path.extension().and_then(|s| s.to_str());
+                if !matches!(extension, Some("js") | Some("ts")) {
+                    continue;
+                }
 
-            match change.typ {
-                FileChangeType::CREATED | FileChangeType::CHANGED => {
-                    if let Ok(count) = manager.reload_file(path.clone()) {
-                        spawn_log(
+                match change.typ {
+                    FileChangeType::CREATED | FileChangeType::CHANGED => {
+                        if let Ok(count) = manager.reload_file(path.clone()) {
+                            spawn_log(
                             self.client.clone(),
                             MessageType::INFO,
                             format!(
@@ -1009,22 +1056,22 @@ impl LanguageServer for ForgeScriptServer {
                                 path.display()
                             ),
                         );
+                        }
                     }
+                    FileChangeType::DELETED => {
+                        manager.remove_functions_at_path(&path);
+                        spawn_log(
+                            self.client.clone(),
+                            MessageType::INFO,
+                            format!(
+                                "[INFO] Removed custom functions from deleted file: {}",
+                                path.display()
+                            ),
+                        );
+                    }
+                    _ => {}
                 }
-                FileChangeType::DELETED => {
-                    manager.remove_functions_at_path(&path);
-                    spawn_log(
-                        self.client.clone(),
-                        MessageType::INFO,
-                        format!(
-                            "[INFO] Removed custom functions from deleted file: {}",
-                            path.display()
-                        ),
-                    );
-                }
-                _ => {}
             }
         }
     }
-}
 }
