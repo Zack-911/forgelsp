@@ -387,24 +387,103 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
         let start_pos = offset_to_position(source, start);
         let end_pos = offset_to_position(source, end);
 
-        let delta_line = start_pos.line.saturating_sub(last_line);
-        let delta_start = if delta_line == 0 {
-            start_pos.character.saturating_sub(last_col)
+        if start_pos.line == end_pos.line {
+            // Single line token
+            let delta_line = start_pos.line.saturating_sub(last_line);
+            let delta_start = if delta_line == 0 {
+                start_pos.character.saturating_sub(last_col)
+            } else {
+                start_pos.character
+            };
+
+            tokens.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length: (end_pos.character - start_pos.character).max(1),
+                token_type,
+                token_modifiers_bitset: 0,
+            });
+
+            last_line = start_pos.line;
+            last_col = start_pos.character;
         } else {
-            start_pos.character
-        };
+            // Multi-line token - split into multiple tokens
+            let lines: Vec<&str> = source.lines().collect();
+            
+            for line_idx in start_pos.line..=end_pos.line {
+                let delta_line = line_idx.saturating_sub(last_line);
+                let line_text = lines.get(line_idx as usize).unwrap_or(&"");
+                
+                let (start_char, length) = if line_idx == start_pos.line {
+                    // First line: from start_pos.character to end of line
+                    (start_pos.character, (line_text.chars().count() as u32).saturating_sub(start_pos.character))
+                } else if line_idx == end_pos.line {
+                    // Last line: from start of line to end_pos.character
+                    (0, end_pos.character)
+                } else {
+                    // Middle lines: entire line
+                    (0, line_text.chars().count() as u32)
+                };
 
-        tokens.push(SemanticToken {
-            delta_line,
-            delta_start,
-            length: (end_pos.character - start_pos.character).max(1),
-            token_type,
-            token_modifiers_bitset: 0,
-        });
+                if length > 0 {
+                    let delta_start = if delta_line == 0 {
+                        start_char.saturating_sub(last_col)
+                    } else {
+                        start_char
+                    };
 
-        last_line = start_pos.line;
-        last_col = start_pos.character;
+                    tokens.push(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length,
+                        token_type,
+                        token_modifiers_bitset: 0,
+                    });
+
+                    last_line = line_idx;
+                    last_col = start_char;
+                }
+            }
+        }
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::MetadataManager;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_multiline_comment_tokens() {
+        let source = "code: `$c[line1\nline2\nline3]`";
+        let manager = Arc::new(MetadataManager::new("./.cache", vec![], None).unwrap());
+        let tokens = extract_semantic_tokens_with_colors(source, false, &manager);
+
+        // $c[line1  (length 8: $c[line1)
+        // line2     (length 5: line2)
+        // line3]    (length 6: line3])
+        
+        assert_eq!(tokens.len(), 3);
+        
+        // Token 1
+        assert_eq!(tokens[0].delta_line, 0);
+        assert_eq!(tokens[0].delta_start, 7); // code: ` is 7 chars
+        assert_eq!(tokens[0].length, 8);
+        assert_eq!(tokens[0].token_type, 5);
+
+        // Token 2
+        assert_eq!(tokens[1].delta_line, 1);
+        assert_eq!(tokens[1].delta_start, 0);
+        assert_eq!(tokens[1].length, 5);
+        assert_eq!(tokens[1].token_type, 5);
+
+        // Token 3
+        assert_eq!(tokens[2].delta_line, 1);
+        assert_eq!(tokens[2].delta_start, 0);
+        assert_eq!(tokens[2].length, 6);
+        assert_eq!(tokens[2].token_type, 5);
+    }
 }
