@@ -12,7 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -281,7 +280,6 @@ impl ForgeScriptServer {
     fn build_signature_help_parameters(
         &self,
         func: &crate::metadata::Function,
-        mgr: &MetadataManager,
     ) -> Vec<ParameterInformation> {
         let args = func.args.clone().unwrap_or_default();
         args.iter()
@@ -311,28 +309,7 @@ impl ForgeScriptServer {
                     name.push_str(&type_str);
                 }
 
-                let mut doc = a.description.clone();
-
-                if let Some(enum_name) = &a.enum_name {
-                    if let Some(values) = mgr
-                        .enums
-                        .read()
-                        .expect("Server: enums lock poisoned")
-                        .get(enum_name)
-                    {
-                        let _ = writeln!(doc, "\n\n**{enum_name}**:");
-                        for v in values {
-                            let _ = writeln!(doc, "- {v}");
-                        }
-                    }
-                } else if let Some(values) = &a.arg_enum {
-                    doc.push_str("\n\n**Values**:\n");
-                    for v in values {
-                        doc.push_str("- ");
-                        doc.push_str(v);
-                        doc.push('\n');
-                    }
-                }
+                let doc = a.description.clone();
 
                 ParameterInformation {
                     label: ParameterLabel::Simple(name),
@@ -449,6 +426,12 @@ impl tower_lsp::lsp_types::notification::Notification for DepthNotification {
     const METHOD: &'static str = "forge/updateDepth";
 }
 
+struct TriggerCompletionNotification;
+impl tower_lsp::lsp_types::notification::Notification for TriggerCompletionNotification {
+    type Params = Url;
+    const METHOD: &'static str = "forge/triggerCompletion";
+}
+
 /// Returns the server capabilities for this LSP.
 fn build_capabilities() -> ServerCapabilities {
     ServerCapabilities {
@@ -458,7 +441,14 @@ fn build_capabilities() -> ServerCapabilities {
         folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: Some(vec!["$".into(), ".".into()]),
+            trigger_characters: Some(vec![
+                "$".into(),
+                ".".into(),
+                "[".into(),
+                ";".into(),
+                ",".into(),
+                " ".into(),
+            ]),
             ..Default::default()
         }),
         signature_help_provider: Some(SignatureHelpOptions {
@@ -825,6 +815,62 @@ impl LanguageServer for ForgeScriptServer {
             return Ok(None);
         };
 
+        let mgr = self
+            .manager
+            .read()
+            .expect("Server: manager lock poisoned")
+            .clone();
+
+        // Check if cursor is in a function call for enum arguments
+        let text_up_to_cursor = self.get_text_up_to_cursor(text, position);
+        if let Some((func_name, open_index)) = self.find_active_function_call(&text_up_to_cursor) {
+            let param_index =
+                self.compute_active_param_index(&text_up_to_cursor[open_index + 1..]) as usize;
+            let lookup = format!("${func_name}");
+
+            if let Some(func) = mgr.get(&lookup) {
+                if let Some(args) = &func.args {
+                    // Handle rest arguments by using the last argument definition if index exceeds
+                    let arg_idx = if param_index >= args.len() {
+                        if args.last().map(|a| a.rest).unwrap_or(false) {
+                            args.len() - 1
+                        } else {
+                            param_index
+                        }
+                    } else {
+                        param_index
+                    };
+
+                    if let Some(arg) = args.get(arg_idx) {
+                        let enum_values = if let Some(enum_name) = &arg.enum_name {
+                            mgr.enums
+                                .read()
+                                .expect("Server: enums lock poisoned")
+                                .get(enum_name)
+                                .cloned()
+                        } else {
+                            arg.arg_enum.clone()
+                        };
+
+                        if let Some(values) = enum_values {
+                            let items = values
+                                .into_iter()
+                                .map(|v| CompletionItem {
+                                    label: v.clone(),
+                                    kind: Some(CompletionItemKind::ENUM_MEMBER),
+                                    detail: Some(format!("Enum value for {}", arg.name)),
+                                    insert_text: Some(v),
+                                    ..Default::default()
+                                })
+                                .collect();
+
+                            return Ok(Some(CompletionResponse::Array(items)));
+                        }
+                    }
+                }
+            }
+        }
+
         let lines: Vec<&str> = text.lines().collect();
         let line = lines.get(position.line as usize).unwrap_or(&"");
 
@@ -851,11 +897,6 @@ impl LanguageServer for ForgeScriptServer {
         }
         let range = Range::new(Position::new(position.line, start_char), position);
 
-        let mgr = self
-            .manager
-            .read()
-            .expect("Server: manager lock poisoned")
-            .clone();
         let items: Vec<CompletionItem> = mgr
             .all_functions()
             .into_iter()
@@ -904,7 +945,7 @@ impl LanguageServer for ForgeScriptServer {
         let lookup = format!("${func_name}");
 
         if let Some(func) = mgr.get(&lookup) {
-            let params = self.build_signature_help_parameters(&func, &mgr);
+            let params = self.build_signature_help_parameters(&func);
             let sig_label = func.signature_label();
 
             let signature = SignatureInformation {
@@ -991,7 +1032,65 @@ impl LanguageServer for ForgeScriptServer {
                             .expect("Server: cursors lock poisoned");
                         cursors.insert(moved_params.uri.clone(), moved_params.position);
                     }
-                    self.update_depth(moved_params.uri).await;
+                    self.update_depth(moved_params.uri.clone()).await;
+
+                    // Trigger completion if cursor moved into an enum argument
+                    let should_trigger = {
+                        let docs = self.documents.read().expect("Server: documents lock poisoned");
+                        if let Some(text) = docs.get(&moved_params.uri) {
+                            let text_up_to_cursor =
+                                self.get_text_up_to_cursor(text, moved_params.position);
+                            if let Some((func_name, open_index)) =
+                                self.find_active_function_call(&text_up_to_cursor)
+                            {
+                                let param_index = self
+                                    .compute_active_param_index(&text_up_to_cursor[open_index + 1..])
+                                    as usize;
+                                let mgr = self
+                                    .manager
+                                    .read()
+                                    .expect("Server: manager lock poisoned")
+                                    .clone();
+                                let lookup = format!("${func_name}");
+
+                                if let Some(func) = mgr.get(&lookup) {
+                                    if let Some(args) = &func.args {
+                                        let arg_idx = if param_index >= args.len() {
+                                            if args.last().map(|a| a.rest).unwrap_or(false) {
+                                                args.len() - 1
+                                            } else {
+                                                param_index
+                                            }
+                                        } else {
+                                            param_index
+                                        };
+
+                                        if let Some(arg) = args.get(arg_idx) {
+                                            arg.enum_name.is_some() || arg.arg_enum.is_some()
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_trigger {
+                        self.client
+                            .send_notification::<TriggerCompletionNotification>(
+                                moved_params.uri.clone(),
+                            )
+                            .await;
+                    }
                 }
             }
         }
