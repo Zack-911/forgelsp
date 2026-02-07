@@ -996,8 +996,13 @@ fn parse_nested_args(
 
         match c {
             '[' => {
-                // Only increment depth if this bracket is not escaped
-                if !is_escaped_bracket_in_args(&char_positions, char_idx) {
+                // Only increment depth if this bracket is part of a function call
+                // Note: is_function_call_bracket expects full code, but here we have just the args text.
+                // We can't easily use is_function_call_bracket here without passing the full text and adjusted offset.
+                // Alternatively, we can check if it's preceded by $name in the 'input' string.
+                if !is_escaped_bracket_in_args(&char_positions, char_idx) && 
+                   (is_function_call_bracket_sub(input, byte_idx))
+                {
                     depth += 1;
                 }
                 current.push(c);
@@ -1097,6 +1102,53 @@ fn parse_nested_args(
 
 /// Checks if a bracket at the given position is escaped (preceded by exactly two backslashes).
 /// This is used during structural bracket matching to ensure escaped brackets don't affect depth.
+/// Helper for parse_nested_args to check if a '[' in the args string is a function call.
+fn is_function_call_bracket_sub(input: &str, bracket_idx: usize) -> bool {
+    if bracket_idx == 0 || input.as_bytes().get(bracket_idx) != Some(&b'[') {
+        return false;
+    }
+
+    let mut i = bracket_idx;
+    let bytes = input.as_bytes();
+    
+    // Skip modifiers
+    while i > 0 && matches!(bytes[i - 1], b'!' | b'#' | b'@' | b']') {
+        if bytes[i - 1] == b']' {
+            let mut depth = 0;
+            let mut found = false;
+            while i > 0 {
+                i -= 1;
+                if bytes[i] == b']' {
+                    depth += 1;
+                } else if bytes[i] == b'[' {
+                    depth -= 1;
+                    if depth == 0 {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found || i == 0 || bytes[i - 1] != b'@' {
+                return false;
+            }
+            i -= 1;
+        } else {
+            i -= 1;
+        }
+    }
+
+    let _name_end = i;
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    
+    // In args, we don't necessarily have $ at the start if it was escaped? 
+    // Actually, $function[...] ALWAYS starts with $.
+    
+    i > 0 && bytes[i - 1] == b'$' && (i == 1 || bytes[i - 2] != b'\\')
+}
+
+
 pub(crate) fn is_escaped_bracket_in_args(char_positions: &[(usize, char)], char_idx: usize) -> bool {
     // Check if current char is [ or ]
     if char_idx >= char_positions.len() {
