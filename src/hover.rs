@@ -1,8 +1,7 @@
-//! # Hover Provider Module
+//! Implementation of the LSP Hover provider for ForgeScript.
 //!
-//! Implements LSP hover functionality for ForgeScript functions.
-//! Provides rich markdown tooltips with function signatures, descriptions, and examples
-//! when users hover over function names in their code.
+//! Provides context-aware tooltips for functions, including signatures, 
+//! descriptions, and documentation links.
 
 use tower_lsp::jsonrpc::Result;
 #[allow(clippy::wildcard_imports)]
@@ -11,13 +10,7 @@ use tower_lsp::lsp_types::*;
 use crate::server::ForgeScriptServer;
 use crate::utils::{is_escaped, position_to_offset, skip_modifiers, spawn_log};
 
-
-/// Handles LSP hover requests by identifying the ForgeScript function under the cursor.
-///
-/// Provides a markdown tooltip with:
-/// - Function signature with parameter details
-/// - Description from metadata
-/// - Usage examples
+/// Processes a hover request by identifying the symbol under the cursor.
 pub async fn handle_hover(
     server: &ForgeScriptServer,
     params: HoverParams,
@@ -31,6 +24,7 @@ pub async fn handle_hover(
         .clone();
     let position = params.text_document_position_params.position;
 
+    // Retrieve the document content from the server's cache.
     let text: String = {
         let docs = server
             .documents
@@ -49,13 +43,13 @@ pub async fn handle_hover(
         }
     };
 
-    // Calculate byte offset safely handling UTF-16 positions
+    // Convert the LSP UTF-16 cursor position to a byte offset.
     let offset = match position_to_offset(&text, position) {
         Some(o) => o,
         _ => return Ok(None),
     };
 
-    // Include modifier characters in the initial token capture
+    // Defines characters allowed in ForgeScript function identifiers and modifiers.
     let is_ident_char = |c: char| {
         c.is_alphanumeric()
             || c == '_'
@@ -68,10 +62,9 @@ pub async fn handle_hover(
             || c == ']'
     };
 
-    // Find start of token
     let indices: Vec<(usize, char)> = text.char_indices().collect();
 
-    // Find the index in the char_indices vector that corresponds to our byte offset
+    // Map the byte offset to an index in our character vector.
     let mut current_char_idx = indices.len();
     for (idx, (byte_pos, _)) in indices.iter().enumerate() {
         if *byte_pos >= offset {
@@ -80,14 +73,12 @@ pub async fn handle_hover(
         }
     }
 
-    // Scan backwards
+    // Expand search backwards to find the start of the function call (leading '$').
     let mut start_char_idx = current_char_idx;
     while start_char_idx > 0 {
         let (byte_pos, c) = indices[start_char_idx - 1];
         if is_ident_char(c) {
-            // Check if we hit a $ (start of function)
             if c == '$' && !is_escaped(&text, byte_pos) {
-                // We found the start! Include it and stop.
                 start_char_idx -= 1;
                 break;
             }
@@ -97,17 +88,11 @@ pub async fn handle_hover(
         }
     }
 
-    // Scan forwards
+    // Expand search forwards to find the end of the identifier or until the next function call.
     let mut end_char_idx = current_char_idx;
     while end_char_idx < indices.len() {
         let (byte_pos, c) = indices[end_char_idx];
         if is_ident_char(c) {
-            // If we hit a $ (start of NEXT function), stop.
-            // But if it's the start of THIS function (which we might be on), we continue.
-            // We are scanning forwards from current_char_idx.
-            // If current_char_idx is on $, we want to include it.
-            // If we encounter ANOTHER $, we stop.
-
             if c == '$' && !is_escaped(&text, byte_pos) && end_char_idx > start_char_idx {
                 break;
             }
@@ -130,26 +115,16 @@ pub async fn handle_hover(
 
     let raw_token = text[start_byte..end_byte].to_string();
 
-    // Don't provide hover for escape functions or JavaScript expressions
-    if raw_token == "$esc" || raw_token == "$escape" {
+    // Ignore structural symbols and internal expressions.
+    if raw_token == "$esc" || raw_token == "$escape" || raw_token.starts_with("${") {
         return Ok(None);
     }
 
-    // Check if this is a JavaScript expression ${...}
-    if raw_token.starts_with("${") {
-        return Ok(None);
-    }
-
-    // Process modifiers to find the actual function name
-    // Modifiers can be: ! (silent), # (negated), @[...] (seperator)
+    // Strip modifiers (!, #, @[...]) to extract the base function name for metadata lookup.
     let mut clean_token = raw_token.clone();
-
     if clean_token.starts_with('$') {
         let modifier_end_idx = skip_modifiers(&clean_token, 1);
-
-        // Reconstruct the token with just $ + function name
         if modifier_end_idx > 1 {
-            // Check if we have a valid function name after modifiers
             let after_modifiers = &clean_token[modifier_end_idx..];
             if !after_modifiers.is_empty() {
                 clean_token = format!("${after_modifiers}");
@@ -157,11 +132,10 @@ pub async fn handle_hover(
         }
     }
 
-    // Acquire a read lock on the manager
+    // Lookup metadata for the identified function.
     let mgr = server.manager.read().expect("Hover: manager lock poisoned");
     let mgr_inner = mgr.clone();
 
-    // Try to find the function using the cleaned token
     if let Some(func_ref) = mgr_inner.get(&clean_token) {
         let func_name = &func_ref.name;
         let func_description = &func_ref.description;
@@ -171,22 +145,18 @@ pub async fn handle_hover(
         let func_brackets = &func_ref.brackets;
 
         let mut md = String::new();
+        
+        // Build the signature representation.
         let args_str = func_args
             .as_ref()
             .map(|v| {
                 v.iter()
                     .map(|a| {
                         let mut name = String::new();
-                        if a.rest {
-                            name.push_str("...");
-                        }
+                        if a.rest { name.push_str("..."); }
                         name.push_str(&a.name);
-                        
-                        if a.required != Some(true) || a.rest {
-                            name.push('?');
-                        }
+                        if a.required != Some(true) || a.rest { name.push('?'); }
 
-                        // Add type info
                         let type_str = match &a.arg_type {
                             serde_json::Value::String(s) => s.clone(),
                             serde_json::Value::Array(arr) => arr
@@ -229,9 +199,8 @@ pub async fn handle_hover(
             md.push('\n');
         }
 
-        if let Some(exs) = func_examples
-            && !exs.is_empty()
-        {
+        // Include usage examples if provided in metadata.
+        if let Some(exs) = func_examples && !exs.is_empty() {
             md.push_str("\n**Examples:**\n");
             for ex in exs.iter().take(2) {
                 md.push_str("\n```forgescript\n");
@@ -240,10 +209,8 @@ pub async fn handle_hover(
             }
         }
 
-        // Add Links (GitHub and Documentation)
+        // Append external documentation and source links.
         let mut links = Vec::new();
-
-        // GitHub Link
         if let Some(url) = &func_ref.source_url {
             if url.contains("githubusercontent.com") {
                 let parts: Vec<&str> = url.split('/').collect();
@@ -255,10 +222,8 @@ pub async fn handle_hover(
             }
         }
 
-        // Documentation Link
         if let Some(extension) = &func_ref.extension {
             let base_url = "https://docs.botforge.org";
-            // Link format: {base_url}/function/{func_name}?p={extension}
             links.push(format!(
                 "[Documentation]({base_url}/function/{func_name}?p={extension})",
                 base_url = base_url,
