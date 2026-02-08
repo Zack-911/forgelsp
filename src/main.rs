@@ -3,12 +3,18 @@
 //! This module initializes the MetadataManager, loads configuration from forgeconfig.json,
 //! and starts the Tower LSP server on stdin/stdout.
 
+mod commands;
+mod completion;
+mod definition;
+mod depth;
 mod diagnostics;
+mod folding_range;
 mod hover;
 mod metadata;
 mod parser;
 mod semantic;
 mod server;
+mod signature_help;
 mod utils;
 
 use std::collections::HashMap;

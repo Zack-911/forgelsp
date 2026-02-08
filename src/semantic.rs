@@ -3,13 +3,15 @@
 //! Validates function calls against available metadata to distinguish valid
 //! ForgeScript identifiers from text.
 
+use crate::metadata::MetadataManager;
+use crate::server::{CustomNotification, ForgeHighlightsParams, ForgeScriptServer, HighlightRange};
+use crate::utils::{
+    LogLevel, find_matching_bracket_raw, forge_log, is_escaped, offset_to_position,
+};
 use regex::Regex;
 use std::sync::{Arc, LazyLock};
-#[allow(clippy::wildcard_imports)]
+use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-
-use crate::metadata::MetadataManager;
-use crate::utils::{find_matching_bracket_raw, is_escaped, offset_to_position};
 
 /// Identifies ForgeScript code blocks in host configuration files.
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -409,4 +411,79 @@ fn try_find_name_start(raw_func: &str) -> usize {
     } else {
         raw_func.len()
     }
+}
+
+pub async fn handle_semantic_tokens_full(
+    server: &ForgeScriptServer,
+    params: SemanticTokensParams,
+) -> Result<Option<SemanticTokensResult>> {
+    let text = server
+        .documents
+        .read()
+        .expect("Server: lock poisoned")
+        .get(&params.text_document.uri)
+        .cloned()
+        .ok_or(tower_lsp::jsonrpc::Error::invalid_params(
+            "Document not found",
+        ))?;
+    let use_colors = *server
+        .multiple_function_colors
+        .read()
+        .expect("Server: lock poisoned");
+    let mgr = server
+        .manager
+        .read()
+        .expect("Server: lock poisoned")
+        .clone();
+    let tokens = extract_semantic_tokens_with_colors(&text, use_colors, &mgr);
+    Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+        result_id: None,
+        data: tokens,
+    })))
+}
+pub async fn handle_send_highlights(server: &ForgeScriptServer, uri: Url, text: &str) {
+    let start = std::time::Instant::now();
+    let highlights = {
+        let colors = server
+            .function_colors
+            .read()
+            .expect("Server: lock poisoned")
+            .clone();
+        if colors.is_empty() {
+            return;
+        }
+
+        let mgr = server
+            .manager
+            .read()
+            .expect("Server: lock poisoned")
+            .clone();
+        let consistent = *server
+            .consistent_function_colors
+            .read()
+            .expect("Server: lock poisoned");
+
+        extract_highlight_ranges(text, &colors, consistent, &mgr)
+            .into_iter()
+            .map(|(start, end, color)| HighlightRange {
+                range: Range::new(
+                    offset_to_position(text, start),
+                    offset_to_position(text, end),
+                ),
+                color,
+            })
+            .collect::<Vec<HighlightRange>>()
+    };
+
+    server
+        .client
+        .send_notification::<CustomNotification>(ForgeHighlightsParams {
+            uri: uri.clone(),
+            highlights,
+        })
+        .await;
+    forge_log(
+        LogLevel::Debug,
+        &format!("Highlights sent for {} in {:?}", uri, start.elapsed()),
+    );
 }

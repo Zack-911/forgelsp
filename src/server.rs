@@ -12,8 +12,7 @@ use crate::diagnostics::publish_diagnostics;
 use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
-use crate::semantic::extract_semantic_tokens_with_colors;
-use crate::utils::{ForgeConfig, load_forge_config_full, position_to_offset};
+use crate::utils::{ForgeConfig, load_forge_config_full};
 use regex::Regex;
 use tower_lsp::Client;
 use tower_lsp::LanguageServer;
@@ -23,7 +22,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 /// Regex for identifying '$' followed by alphanumeric characters at the end of a string.
-static SIGNATURE_FUNC_RE: LazyLock<Regex> =
+pub(crate) static SIGNATURE_FUNC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").expect("Server: regex failure"));
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,8 +82,8 @@ impl ForgeScriptServer {
             .insert(uri.clone(), parsed.clone());
 
         publish_diagnostics(self, &uri, &text, &parsed.diagnostics).await;
-        self.send_highlights(uri.clone(), &text).await;
-        self.update_depth(uri.clone()).await;
+        crate::semantic::handle_send_highlights(self, uri.clone(), &text).await;
+        crate::depth::handle_update_depth(self, uri.clone()).await;
 
         crate::utils::forge_log(
             crate::utils::LogLevel::Debug,
@@ -99,75 +98,13 @@ impl ForgeScriptServer {
             .expect("Server: lock poisoned")
             .function_count()
     }
-
-    /// Computes and sends custom syntax highlighting data to the client.
-    pub async fn send_highlights(&self, uri: Url, text: &str) {
-        let start = std::time::Instant::now();
-        let highlights = {
-            let colors = self
-                .function_colors
-                .read()
-                .expect("Server: lock poisoned")
-                .clone();
-            if colors.is_empty() {
-                return;
-            }
-
-            let mgr = self.manager.read().expect("Server: lock poisoned").clone();
-            let consistent = *self
-                .consistent_function_colors
-                .read()
-                .expect("Server: lock poisoned");
-
-            crate::semantic::extract_highlight_ranges(text, &colors, consistent, &mgr)
-                .into_iter()
-                .map(|(start, end, color)| HighlightRange {
-                    range: Range::new(
-                        crate::utils::offset_to_position(text, start),
-                        crate::utils::offset_to_position(text, end),
-                    ),
-                    color,
-                })
-                .collect::<Vec<HighlightRange>>()
-        };
-
-        self.client
-            .send_notification::<CustomNotification>(ForgeHighlightsParams {
-                uri: uri.clone(),
-                highlights,
-            })
-            .await;
-        crate::utils::forge_log(
-            crate::utils::LogLevel::Debug,
-            &format!("Highlights sent for {} in {:?}", uri, start.elapsed()),
-        );
-    }
-
-    /// Notifies the client about the current nesting depth at the cursor position.
-    pub async fn update_depth(&self, uri: Url) {
-        let depth = {
-            let docs = self.documents.read().expect("Server: lock poisoned");
-            let Some(text) = docs.get(&uri) else {
-                return;
+    pub(crate) fn get_text_up_to_cursor(&self, text: &str, position: Position) -> String {
+        let mut text_up_to_cursor =
+            if let Some(offset) = crate::utils::position_to_offset(text, position) {
+                text[..offset].to_string()
+            } else {
+                text.to_string()
             };
-            let cursors = self.cursor_positions.read().expect("Server: lock poisoned");
-            let Some(&position) = cursors.get(&uri) else {
-                return;
-            };
-            let offset = position_to_offset(text, position).unwrap_or(0);
-            crate::utils::calculate_depth(text, offset)
-        };
-        self.client
-            .send_notification::<DepthNotification>(ForgeDepthParams { uri, depth })
-            .await;
-    }
-
-    fn get_text_up_to_cursor(&self, text: &str, position: Position) -> String {
-        let mut text_up_to_cursor = if let Some(offset) = position_to_offset(text, position) {
-            text[..offset].to_string()
-        } else {
-            text.to_string()
-        };
 
         if text_up_to_cursor.len() > 8 * 1024 {
             let len = text_up_to_cursor.len();
@@ -176,7 +113,10 @@ impl ForgeScriptServer {
         text_up_to_cursor
     }
 
-    fn find_active_function_call(&self, text_up_to_cursor: &str) -> Option<(String, usize)> {
+    pub(crate) fn find_active_function_call(
+        &self,
+        text_up_to_cursor: &str,
+    ) -> Option<(String, usize)> {
         let mut depth = 0i32;
         let mut last_open_index: Option<usize> = None;
 
@@ -201,7 +141,7 @@ impl ForgeScriptServer {
         Some((func_name, open_index))
     }
 
-    fn compute_active_param_index(&self, text_after_bracket: &str) -> u32 {
+    pub(crate) fn compute_active_param_index(&self, text_after_bracket: &str) -> u32 {
         let mut param_index: u32 = 0;
         let mut local_depth: i32 = 0;
         let mut in_single = false;
@@ -246,141 +186,21 @@ impl ForgeScriptServer {
         }
         param_index
     }
-
-    fn build_signature_help_parameters(
-        &self,
-        func: &crate::metadata::Function,
-    ) -> Vec<ParameterInformation> {
-        func.args
-            .clone()
-            .unwrap_or_default()
-            .iter()
-            .map(|a| {
-                let mut name = String::new();
-                if a.rest {
-                    name.push_str("...");
-                }
-                name.push_str(&a.name);
-                if a.required != Some(true) || a.rest {
-                    name.push('?');
-                }
-
-                let type_str = match &a.arg_type {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Array(arr) => arr
-                        .iter()
-                        .map(|v| v.as_str().unwrap_or("?").to_string())
-                        .collect::<Vec<_>>()
-                        .join("|"),
-                    _ => "Any".to_string(),
-                };
-                if !type_str.is_empty() {
-                    name.push_str(": ");
-                    name.push_str(&type_str);
-                }
-
-                ParameterInformation {
-                    label: ParameterLabel::Simple(name),
-                    documentation: Some(Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: a.description.clone(),
-                    })),
-                }
-            })
-            .collect()
-    }
-
-    fn build_completion_item(
-        &self,
-        f: Arc<crate::metadata::Function>,
-        modifier: &str,
-        range: Range,
-    ) -> CompletionItem {
-        let base = f.name.clone();
-        let name = if !modifier.is_empty() && base.starts_with('$') {
-            format!("${modifier}{}", &base[1..])
-        } else {
-            base.clone()
-        };
-
-        CompletionItem {
-            label: name.clone(),
-            kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some(
-                f.extension.clone().unwrap_or_else(|| {
-                    f.category.clone().unwrap_or_else(|| "Function".to_string())
-                }),
-            ),
-            documentation: Some(Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: self.build_completion_markdown(&f),
-            })),
-            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
-                range,
-                new_text: name,
-            })),
-            filter_text: Some(base),
-            ..Default::default()
-        }
-    }
-
-    fn build_completion_markdown(&self, f: &Arc<crate::metadata::Function>) -> String {
-        let mut md = format!("```forgescript\n{}\n```\n\n", f.signature_label());
-        if !f.description.is_empty() {
-            md.push_str(&f.description);
-            md.push_str("\n\n");
-        }
-
-        if let Some(examples) = &f.examples {
-            if !examples.is_empty() {
-                md.push_str("**Examples:**\n");
-                for ex in examples.iter().take(2) {
-                    md.push_str(&format!("\n```forgescript\n{ex}\n```\n"));
-                }
-            }
-        }
-
-        let mut links = Vec::new();
-        if let Some(url) = &f.source_url
-            && url.contains("githubusercontent.com")
-        {
-            let parts: Vec<&str> = url.split('/').collect();
-            if parts.len() >= 5 {
-                links.push(format!(
-                    "[GitHub](https://github.com/{}/{})",
-                    parts[3], parts[4]
-                ));
-            }
-        }
-
-        if let Some(extension) = &f.extension {
-            links.push(format!(
-                "[Documentation](https://docs.botforge.org/function/{}?p={})",
-                f.name, extension
-            ));
-        }
-
-        if !links.is_empty() {
-            md.push_str("\n---\n");
-            md.push_str(&links.join(" | "));
-        }
-        md
-    }
 }
 
-struct CustomNotification;
+pub(crate) struct CustomNotification;
 impl tower_lsp::lsp_types::notification::Notification for CustomNotification {
     type Params = ForgeHighlightsParams;
     const METHOD: &'static str = "forge/highlights";
 }
 
-struct DepthNotification;
+pub(crate) struct DepthNotification;
 impl tower_lsp::lsp_types::notification::Notification for DepthNotification {
     type Params = ForgeDepthParams;
     const METHOD: &'static str = "forge/updateDepth";
 }
 
-struct TriggerCompletionNotification;
+pub(crate) struct TriggerCompletionNotification;
 impl tower_lsp::lsp_types::notification::Notification for TriggerCompletionNotification {
     type Params = Url;
     const METHOD: &'static str = "forge/triggerCompletion";
@@ -554,322 +374,33 @@ impl LanguageServer for ForgeScriptServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let uri = params.text_document_position_params.text_document.uri;
-        let position = params.text_document_position_params.position;
-        let text = self
-            .documents
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params(
-                "Document not found",
-            ))?;
-        let offset = position_to_offset(&text, position).ok_or(
-            tower_lsp::jsonrpc::Error::invalid_params("Invalid position"),
-        )?;
-
-        let is_ident_char = |c: char| {
-            c.is_alphanumeric()
-                || c == '_'
-                || c == '.'
-                || c == '$'
-                || c == '!'
-                || c == '#'
-                || c == '@'
-                || c == '['
-                || c == ']'
-        };
-        let indices: Vec<(usize, char)> = text.char_indices().collect();
-        let curr = indices
-            .iter()
-            .position(|&(p, _)| p >= offset)
-            .unwrap_or(indices.len());
-
-        let mut start = curr;
-        while start > 0 && is_ident_char(indices[start - 1].1) {
-            start -= 1;
-            if indices[start].1 == '$' && !crate::utils::is_escaped(&text, indices[start].0) {
-                break;
-            }
-        }
-
-        let mut end = curr;
-        while end < indices.len() && is_ident_char(indices[end].1) {
-            if indices[end].1 == '$'
-                && !crate::utils::is_escaped(&text, indices[end].0)
-                && end > start
-            {
-                break;
-            }
-            end += 1;
-        }
-
-        if start >= end {
-            return Ok(None);
-        }
-        let mut token = text[indices[start].0..if end < indices.len() {
-            indices[end].0
-        } else {
-            text.len()
-        }]
-            .to_string();
-
-        if token.starts_with('$') {
-            let mod_end = crate::utils::skip_modifiers(&token, 1);
-            if mod_end > 1 && !&token[mod_end..].is_empty() {
-                token = format!("${}", &token[mod_end..]);
-            }
-        }
-
-        if let Some(func) = self
-            .manager
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&token)
-            && let (Some(path), Some(line)) = (&func.local_path, func.line)
-        {
-            let target_uri = Url::from_file_path(path)
-                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri: target_uri,
-                range: Range::new(Position::new(line, 0), Position::new(line, 0)),
-            })));
-        }
-        Ok(None)
+        crate::definition::handle_definition(self, params).await
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
-        let uri = params.text_document.uri;
-        let parsed = self
-            .parsed_cache
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params("Not parsed"))?;
-        let text = self
-            .documents
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params("No text"))?;
-
-        let mut ranges = Vec::new();
-        for func in &parsed.functions {
-            let start = crate::utils::offset_to_position(&text, func.span.0);
-            let end = crate::utils::offset_to_position(&text, func.span.1);
-            if start.line < end.line {
-                ranges.push(FoldingRange {
-                    start_line: start.line,
-                    start_character: Some(start.character),
-                    end_line: end.line,
-                    end_character: Some(end.character),
-                    kind: Some(FoldingRangeKind::Region),
-                    collapsed_text: Some(func.name.clone()),
-                });
-            }
-        }
-        Ok(Some(ranges))
+        crate::folding_range::handle_folding_range(self, params).await
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let start = std::time::Instant::now();
-        let uri = params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-        crate::utils::forge_log(
-            crate::utils::LogLevel::Debug,
-            &format!("Completion request for {} at {:?}", uri, position),
-        );
-        let text = self
-            .documents
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params(
-                "Document not found",
-            ))?;
-        let mgr = self.manager.read().expect("Server: lock poisoned").clone();
-
-        let text_up_to_cursor = self.get_text_up_to_cursor(&text, position);
-        if let Some((func_name, open_idx)) = self.find_active_function_call(&text_up_to_cursor) {
-            let param_idx =
-                self.compute_active_param_index(&text_up_to_cursor[open_idx + 1..]) as usize;
-            if let Some(func) = mgr.get(&format!("${func_name}"))
-                && let Some(args) = &func.args
-            {
-                let arg_idx =
-                    if param_idx >= args.len() && args.last().map(|a| a.rest).unwrap_or(false) {
-                        args.len() - 1
-                    } else {
-                        param_idx
-                    };
-                if let Some(arg) = args.get(arg_idx) {
-                    let enum_vals = if let Some(en) = &arg.enum_name {
-                        mgr.enums
-                            .read()
-                            .expect("Server: lock poisoned")
-                            .get(en)
-                            .cloned()
-                    } else {
-                        arg.arg_enum.clone()
-                    };
-                    if let Some(vals) = enum_vals {
-                        let items = vals
-                            .into_iter()
-                            .map(|v| CompletionItem {
-                                label: v.clone(),
-                                kind: Some(CompletionItemKind::ENUM_MEMBER),
-                                detail: Some(format!("Enum for {}", arg.name)),
-                                insert_text: Some(v),
-                                ..Default::default()
-                            })
-                            .collect();
-                        return Ok(Some(CompletionResponse::Array(items)));
-                    }
-                }
-            }
-        }
-
-        let line = text.lines().nth(position.line as usize).unwrap_or("");
-        let offset =
-            position_to_offset(line, Position::new(0, position.character)).unwrap_or(line.len());
-        let before = &line[..offset];
-
-        let Some(dollar_idx) = before.rfind('$') else {
-            return Ok(None);
-        };
-        let after_dollar = &before[dollar_idx + 1..];
-        let modifier = if after_dollar.starts_with('!') {
-            "!"
-        } else if after_dollar.starts_with('.') {
-            "."
-        } else {
-            ""
-        };
-
-        let mut start_char = 0;
-        for c in line[..dollar_idx].chars() {
-            start_char += c.len_utf16() as u32;
-        }
-        let range = Range::new(Position::new(position.line, start_char), position);
-
-        let items = mgr
-            .all_functions()
-            .into_iter()
-            .map(|f| self.build_completion_item(f, modifier, range))
-            .collect::<Vec<_>>();
-        crate::utils::forge_log(
-            crate::utils::LogLevel::Debug,
-            &format!("Completion response built in {:?}", start.elapsed()),
-        );
-        Ok(Some(CompletionResponse::Array(items)))
+        crate::completion::handle_completion(self, params).await
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        let uri = params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-        let text = self
-            .documents
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params(
-                "Document not found",
-            ))?;
-
-        let text_up_to_cursor = self.get_text_up_to_cursor(&text, pos);
-        let Some((func_name, open_idx)) = self.find_active_function_call(&text_up_to_cursor) else {
-            return Ok(None);
-        };
-        let param_idx = self.compute_active_param_index(&text_up_to_cursor[open_idx + 1..]);
-
-        let mgr = self.manager.read().expect("Server: lock poisoned").clone();
-        if let Some(func) = mgr.get(&format!("${func_name}")) {
-            let sig = SignatureInformation {
-                label: func.signature_label(),
-                documentation: Some(Documentation::String(func.description.clone())),
-                parameters: Some(self.build_signature_help_parameters(&func)),
-                active_parameter: Some(param_idx),
-            };
-            return Ok(Some(SignatureHelp {
-                signatures: vec![sig],
-                active_signature: Some(0),
-                active_parameter: Some(param_idx),
-            }));
-        }
-        Ok(None)
+        crate::signature_help::handle_signature_help(self, params).await
     }
 
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
-        let text = self
-            .documents
-            .read()
-            .expect("Server: lock poisoned")
-            .get(&params.text_document.uri)
-            .cloned()
-            .ok_or(tower_lsp::jsonrpc::Error::invalid_params(
-                "Document not found",
-            ))?;
-        let use_colors = *self
-            .multiple_function_colors
-            .read()
-            .expect("Server: lock poisoned");
-        let mgr = self.manager.read().expect("Server: lock poisoned").clone();
-        let tokens = extract_semantic_tokens_with_colors(&text, use_colors, &mgr);
-        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-            result_id: None,
-            data: tokens,
-        })))
+        crate::semantic::handle_semantic_tokens_full(self, params).await
     }
 
     async fn execute_command(
         &self,
         params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
-        if params.command == "forge/cursorMoved"
-            && let Some(args) = params.arguments.get(0)
-        {
-            if let Ok(moved) = serde_json::from_value::<CursorMovedParams>(args.clone()) {
-                self.cursor_positions
-                    .write()
-                    .expect("Server: lock poisoned")
-                    .insert(moved.uri.clone(), moved.position);
-                self.update_depth(moved.uri.clone()).await;
-
-                let should_trigger = (|| {
-                    let docs = self.documents.read().expect("Server: lock poisoned");
-                    let text = docs.get(&moved.uri)?;
-                    let up_to_cursor = self.get_text_up_to_cursor(text, moved.position);
-                    let (name, open) = self.find_active_function_call(&up_to_cursor)?;
-                    let idx = self.compute_active_param_index(&up_to_cursor[open + 1..]) as usize;
-                    let mgr = self.manager.read().expect("Server: lock poisoned").clone();
-                    let func = mgr.get(&format!("${name}"))?;
-                    let args = func.args.as_ref()?;
-                    let arg_idx = if idx >= args.len() && args.last()?.rest {
-                        args.len() - 1
-                    } else {
-                        idx
-                    };
-                    let arg = args.get(arg_idx)?;
-                    Some(arg.enum_name.is_some() || arg.arg_enum.is_some())
-                })()
-                .unwrap_or(false);
-
-                if should_trigger {
-                    self.client
-                        .send_notification::<TriggerCompletionNotification>(moved.uri.clone())
-                        .await;
-                }
-            }
-        }
-        Ok(None)
+        crate::commands::handle_execute_command(self, params).await
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
