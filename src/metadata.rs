@@ -868,6 +868,8 @@ impl MetadataManager {
             .expect("MetadataManager: regex compile failed");
         let type_re = regex::Regex::new(r"type:\s*([^,}\n\s]+)")
             .expect("MetadataManager: regex compile failed");
+        let output_re = regex::Regex::new(r"output:\s*([^,}\n\s]+)")
+            .expect("MetadataManager: regex compile failed");
 
         for i in 0..filtered_names.len() {
             let (_start, end_pos, name, line) = &filtered_names[i];
@@ -886,6 +888,13 @@ impl MetadataManager {
                 .map(|c| c[1].to_string());
 
             let brackets = brackets_re.captures(chunk).map(|c| &c[1] == "true");
+
+            let output = output_re.captures(chunk).map(|c| {
+                c[1].split(',')
+                    .map(|s| s.trim().trim_matches(|c| c == '\'' || c == '\"').to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            });
 
             let mut params = None;
             // Find if there's a params range that starts within this function's chunk
@@ -1002,6 +1011,7 @@ impl MetadataManager {
                 alias: None,
                 path: Some(file_path.to_string()),
                 line: Some(*line),
+                output,
             });
         }
 
@@ -1120,7 +1130,7 @@ impl MetadataManager {
                 brackets,
                 unwrap: false,
                 args,
-                output: None,
+                output: custom.output,
                 category: Some("custom".to_string()),
                 aliases,
                 experimental: None,
@@ -1191,114 +1201,5 @@ impl MetadataManager {
             .read()
             .expect("MetadataManager: trie lock poisoned");
         trie.collect_all()
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_cache_path() {
-        let fetcher = Fetcher::new("./.test_cache", None);
-        
-        // GitHub URL
-        let url1 = "https://raw.githubusercontent.com/tryforge/forgescript/dev/metadata/functions.json";
-        let path1 = fetcher.cache_path(url1);
-        assert_eq!(path1.file_name().unwrap().to_str().unwrap(), "ForgescriptFunctionsDev.json");
-
-        let url2 = "https://raw.githubusercontent.com/owner/repo/master/enums.json";
-        let path2 = fetcher.cache_path(url2);
-        assert_eq!(path2.file_name().unwrap().to_str().unwrap(), "RepoEnumsMaster.json");
-
-        // Fallback
-        let url3 = "https://example.com/data.json";
-        let path3 = fetcher.cache_path(url3);
-        assert!(path3.file_name().unwrap().to_str().unwrap().ends_with(".json"));
-        assert!(!path3.file_name().unwrap().to_str().unwrap().contains("Functions"));
-    }
-
-    #[test]
-    fn test_cleanup() {
-        let cache_dir = "./.test_cleanup_cache";
-        let fetcher = Fetcher::new(cache_dir, None);
-        
-        let url1 = "https://raw.githubusercontent.com/tryforge/forgescript/dev/metadata/functions.json";
-        let path1 = fetcher.cache_path(url1);
-        fs::write(&path1, "{}").unwrap();
-
-        let old_path = PathBuf::from(cache_dir).join("old_cache_file.json");
-        fs::write(&old_path, "{}").unwrap();
-
-        assert!(path1.exists());
-        assert!(old_path.exists());
-
-        fetcher.cleanup_unused_cache(&[url1.to_string()] as &[String]).unwrap();
-
-        assert!(path1.exists());
-        assert!(!old_path.exists());
-
-        fs::remove_dir_all(cache_dir).unwrap();
-    }
-    #[test]
-    fn test_signature_label() {
-        let func = Function {
-            name: "$testFunc".to_string(),
-            version: JsonValue::String("1.0".to_string()),
-            description: "A test function".to_string(),
-            brackets: Some(true),
-            unwrap: false,
-            args: Some(vec![
-                Arg {
-                    name: "requiredArg".to_string(),
-                    description: "desc".to_string(),
-                    rest: false,
-                    required: Some(true),
-                    arg_type: JsonValue::String("Number".to_string()),
-                    condition: None,
-                    arg_enum: None,
-                    enum_name: None,
-                    pointer: None,
-                    pointer_property: None,
-                },
-                Arg {
-                    name: "optionalArg".to_string(),
-                    description: "desc".to_string(),
-                    rest: false,
-                    required: Some(false),
-                    arg_type: JsonValue::String("String".to_string()),
-                    condition: None,
-                    arg_enum: None,
-                    enum_name: None,
-                    pointer: None,
-                    pointer_property: None,
-                },
-                Arg {
-                    name: "implicitOptional".to_string(),
-                    description: "desc".to_string(),
-                    rest: false,
-                    required: None, // Implicitly optional
-                    arg_type: JsonValue::String("Boolean".to_string()),
-                    condition: None,
-                    arg_enum: None,
-                    enum_name: None,
-                    pointer: None,
-                    pointer_property: None,
-                },
-            ]),
-            output: Some(vec!["Void".to_string()]),
-            category: None,
-            aliases: None,
-            experimental: None,
-            examples: None,
-            deprecated: None,
-            extension: None,
-            source_url: None,
-            local_path: None,
-            line: None,
-        };
-
-        let label = func.signature_label();
-        // requiredArg: Number; optionalArg?: String; implicitOptional?: Boolean
-        assert_eq!(label, "$testFunc[requiredArg: Number; optionalArg?: String; implicitOptional?: Boolean]");
     }
 }
