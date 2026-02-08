@@ -1,7 +1,4 @@
-//! # Diagnostics Module
-//!
-//! Converts parser diagnostics to LSP format and publishes them to the client.
-//! Handles byte offset to line/character position conversion for LSP compatibility.
+//! Logic for transforming and publishing document diagnostics.
 
 use crate::parser::Diagnostic as ParseDiagnostic;
 use crate::server::ForgeScriptServer;
@@ -9,24 +6,17 @@ use crate::utils::offset_to_position;
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
-
-/// Publishes diagnostics to the LSP client for a given document.
+/// Maps internal parser errors to LSP-compliant diagnostics and publishes them to the client.
 ///
-/// Converts internal parser diagnostics (with byte offsets) to LSP diagnostics
-/// (with line/character positions) and sends them to the client.
-///
-/// # Arguments
-/// * `server` - The ForgeScriptServer instance
-/// * `uri` - The document URI to publish diagnostics for
-/// * `text` - The full document text (needed for position conversion)
-/// * `diagnostics_data` - Array of parser diagnostics with byte offsets
+/// This function converts byte offsets within the source text into line and character 
+/// positions required by the LSP specification.
 pub async fn publish_diagnostics(
     server: &ForgeScriptServer,
     uri: &Url,
     text: &str,
     diagnostics_data: &[ParseDiagnostic],
 ) {
-    // Convert each parser diagnostic to LSP format
+    // Map each parser-generated diagnostic to an LSP Diagnostic object.
     let diagnostics: Vec<Diagnostic> = diagnostics_data
         .iter()
         .map(|d| {
@@ -38,8 +28,6 @@ pub async fn publish_diagnostics(
                     start: start_pos,
                     end: end_pos,
                 },
-                // Currently all diagnostics are errors
-                // Future: could use WARNING for deprecated functions, INFO for suggestions
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: d.message.clone(),
                 ..Default::default()
@@ -47,7 +35,7 @@ pub async fn publish_diagnostics(
         })
         .collect();
 
-    // Publish diagnostics to the LSP client
+    // Send the diagnostic set to the client for the specified document URI.
     server
         .client
         .publish_diagnostics(uri.clone(), diagnostics, None)
