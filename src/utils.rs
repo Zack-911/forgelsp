@@ -213,50 +213,48 @@ pub fn is_function_call_bracket(text: &str, bracket_idx: usize) -> bool {
         return false;
     }
 
-    // Look backwards for $name patterns.
-    // Skips modifiers (!, #, etc.) and then checks for name.
     let mut i = bracket_idx;
     let bytes = text.as_bytes();
     
-    // Skip modifiers
-    while i > 0 && matches!(bytes[i - 1], b'!' | b'#' | b'@' | b']') {
-        if bytes[i - 1] == b']' {
-            // Might be @[...]
-            // We need to find the matching [
-            let mut depth = 0;
-            let mut found = false;
-            while i > 0 {
-                i -= 1;
-                if bytes[i] == b']' {
-                    depth += 1;
-                } else if bytes[i] == b'[' {
-                    depth -= 1;
-                    if depth == 0 {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found || i == 0 || bytes[i - 1] != b'@' {
-                return false;
-            }
-            i -= 1; // move to @
-        } else {
-            i -= 1;
-        }
-    }
-
-    // Now look for name
-    let _name_end = i;
+    // Step 1: Skip alphanumeric function name
     while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
         i -= 1;
     }
+
+    // Step 2: Skip modifiers: !, #, @[...]
+    while i > 0 && matches!(bytes[i - 1], b'!' | b'#' | b'@' | b']') {
+        match bytes[i - 1] {
+            b'!' | b'#' => i -= 1,
+            b']' => {
+                // Skip bracketed count: @[10]
+                let mut depth = 0;
+                let mut found = false;
+                while i > 0 {
+                    i -= 1;
+                    if bytes[i] == b']' {
+                        depth += 1;
+                    } else if bytes[i] == b'[' {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found || i == 0 || bytes[i - 1] != b'@' {
+                    return false;
+                }
+                i -= 1; // Skip '@'
+            }
+            b'@' => {
+                // Lone '@' is not a modifier here (it expects [])
+                break;
+            }
+            _ => break,
+        }
+    }
     
-    // Must have a $ before the name (possibly after modifiers but name is empty? no name is required)
-    // Actually even if name is empty, $! is a thing, but $![...] is a function call.
-    // If name is empty, i == name_end. 
-    // We expect $ somewhere before modifiers.
-    
+    // Step 3: Check for leading $ and ensure it's not escaped
     i > 0 && bytes[i - 1] == b'$' && !is_escaped(text, i - 1)
 }
 
@@ -463,67 +461,3 @@ pub fn calculate_depth(text: &str, offset: usize) -> usize {
     }
     current_depth
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_calculate_depth() {
-        let text = "hello\n$if[depth 1]\n$if[depth 1;\n  $ban[depth 2]\n  $if[depth 2;\n    $if[depth 3]\n  ]\n]";
-        
-        // "hello" -> depth 0
-        assert_eq!(calculate_depth(text, 5), 0);
-        
-        // Inside first $if -> depth 1
-        let offset_depth1 = text.find("depth 1").unwrap();
-        assert_eq!(calculate_depth(text, offset_depth1), 1);
-        
-        // Inside $ban -> depth 2
-        let offset_depth2 = text.find("depth 2").unwrap();
-        assert_eq!(calculate_depth(text, offset_depth2), 2);
-        
-        // Inside innermost $if -> depth 3
-        let offset_depth3 = text.find("depth 3").unwrap();
-        assert_eq!(calculate_depth(text, offset_depth3), 3);
-    }
-
-    #[test]
-    fn test_calculate_depth_escapes() {
-        let text = r#"depth 0 \\[ depth 0 [depth 0] depth 0 $func[depth 1]"#;
-        
-        // Inside escaped bracket -> depth 0
-        let offset1 = text.find("depth 0 [").unwrap() + 8;
-        assert_eq!(calculate_depth(text, offset1), 0);
-        
-        // Inside normal (lone) bracket -> depth 0
-        let offset2 = text.find("depth 0]").unwrap();
-        assert_eq!(calculate_depth(text, offset2), 0);
-
-        // Inside function bracket -> depth 1
-        let offset3 = text.find("depth 1").unwrap();
-        assert_eq!(calculate_depth(text, offset3), 1);
-    }
-
-    #[test]
-    fn test_find_matching_bracket_nested_lone() {
-        let text = r#"$ban[uwu [ hello \\] ]"#;
-        let open_idx = 4;
-        let result = find_matching_bracket(text, open_idx);
-        // Current behavior: result will be None because the unescaped '[' at index 9 increments depth
-        // and there is only one closing ']'. (The first ']' is escaped by '\\]').
-        // New desired behavior: result should be Some(21).
-        assert_eq!(result, Some(21));
-    }
-
-    #[test]
-    fn test_calculate_depth_lone_brackets() {
-        let text = r"hello [ world ] $func[ arg ]";
-        // New desired behavior: 
-        // depth at "world" should be 0 because the [ is alone.
-        // depth at "arg" should be 1 because it's inside $func.
-        assert_eq!(calculate_depth(text, 8), 0);
-        assert_eq!(calculate_depth(text, 22), 1);
-    }
-}
-

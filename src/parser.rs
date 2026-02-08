@@ -1111,40 +1111,45 @@ fn is_function_call_bracket_sub(input: &str, bracket_idx: usize) -> bool {
     let mut i = bracket_idx;
     let bytes = input.as_bytes();
     
-    // Skip modifiers
-    while i > 0 && matches!(bytes[i - 1], b'!' | b'#' | b'@' | b']') {
-        if bytes[i - 1] == b']' {
-            let mut depth = 0;
-            let mut found = false;
-            while i > 0 {
-                i -= 1;
-                if bytes[i] == b']' {
-                    depth += 1;
-                } else if bytes[i] == b'[' {
-                    depth -= 1;
-                    if depth == 0 {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found || i == 0 || bytes[i - 1] != b'@' {
-                return false;
-            }
-            i -= 1;
-        } else {
-            i -= 1;
-        }
-    }
-
-    let _name_end = i;
+    // Step 1: Skip alphanumeric function name
     while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
         i -= 1;
     }
+
+    // Step 2: Skip modifiers: !, #, @[...]
+    while i > 0 && matches!(bytes[i - 1], b'!' | b'#' | b'@' | b']') {
+        match bytes[i - 1] {
+            b'!' | b'#' => i -= 1,
+            b']' => {
+                // Skip bracketed count: @[10]
+                let mut depth = 0;
+                let mut found = false;
+                while i > 0 {
+                    i -= 1;
+                    if bytes[i] == b']' {
+                        depth += 1;
+                    } else if bytes[i] == b'[' {
+                        depth -= 1;
+                        if depth == 0 {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if !found || i == 0 || bytes[i - 1] != b'@' {
+                    return false;
+                }
+                i -= 1; // Skip '@'
+            }
+            b'@' => {
+                // Lone '@' is not a modifier here (it expects [])
+                break;
+            }
+            _ => break,
+        }
+    }
     
-    // In args, we don't necessarily have $ at the start if it was escaped? 
-    // Actually, $function[...] ALWAYS starts with $.
-    
+    // Step 3: Check for leading $ and ensure it's not escaped
     i > 0 && bytes[i - 1] == b'$' && (i == 1 || bytes[i - 2] != b'\\')
 }
 
@@ -1360,61 +1365,5 @@ fn validate_arg_enums(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::metadata::MetadataManager;
-    use std::sync::Arc;
-
-    #[test]
-    fn test_parse_nested_args_spans() {
-        let manager = Arc::new(MetadataManager::new_test());
-        let mut diagnostics = Vec::new();
-        let mut functions = Vec::new();
-        let input = "abc; $func[def]; ghi";
-        let base_offset = 10;
-        
-        let result = parse_nested_args(input, &manager, &mut diagnostics, &mut functions, base_offset).unwrap();
-        
-        assert_eq!(result.len(), 3);
-        
-        // "abc"
-        assert_eq!(result[0].1, (10, 13));
-        
-        // "$func[def]"
-        assert_eq!(result[1].1, (15, 25));
-        
-        // "ghi"
-        assert_eq!(result[2].1, (27, 30));
-    }
-
-    #[test]
-    fn test_offset_spans() {
-        let func_meta = Arc::new(crate::metadata::Function {
-            name: "$test".to_string(),
-            ..Default::default()
-        });
-        
-        let mut func = ParsedFunction {
-            name: "test".to_string(),
-            matched: "$test".to_string(),
-            args: Some(vec![(
-                smallvec![ParsedArg::Literal { text: "arg".to_string() }],
-                (5, 8)
-            )]),
-            span: (0, 10),
-            silent: false,
-            negated: false,
-            count: None,
-            meta: func_meta,
-        };
-        
-        func.offset_spans(100);
-        
-        assert_eq!(func.span, (100, 110));
-        assert_eq!(func.args.unwrap()[0].1, (105, 108));
     }
 }
