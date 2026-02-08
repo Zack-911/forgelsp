@@ -1,6 +1,6 @@
 //! Utility functions for ForgeLSP.
 //!
-//! Includes logic for configuration loading, GitHub URL resolution, 
+//! Includes logic for configuration loading, GitHub URL resolution,
 //! asynchronous logging, and ForgeScript-specific string manipulation.
 
 use std::fs;
@@ -8,15 +8,67 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tower_lsp::Client;
-#[allow(clippy::wildcard_imports)]
+use std::io::Write;
+use std::sync::OnceLock;
 use tower_lsp::lsp_types::*;
 
-/// Spawns a non-blocking task to send a log message to the LSP client.
-pub fn spawn_log(client: Client, ty: MessageType, msg: String) {
-    tokio::spawn(async move {
-        let () = client.log_message(ty, msg).await;
-    });
+/// Available log levels for ForgeLSP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Trace = 0,
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
+}
+
+/// Specialized logger for ForgeLSP that writes to console and a file.
+pub struct ForgeLogger {
+    pub level: LogLevel,
+    pub log_path: PathBuf,
+}
+
+static LOGGER: OnceLock<ForgeLogger> = OnceLock::new();
+
+/// Initializes the global logger, clearing any existing log file.
+pub fn init_logger(workspace_root: PathBuf, level: LogLevel) -> anyhow::Result<()> {
+    let vscode_dir = workspace_root.join(".vscode");
+    if !vscode_dir.exists() {
+        let _ = fs::create_dir_all(&vscode_dir);
+    }
+    let log_path = vscode_dir.join("forgelsp.log");
+
+    // Clear/Create the log file on start
+    let _ = fs::File::create(&log_path);
+
+    LOGGER
+        .set(ForgeLogger { level, log_path })
+        .map_err(|_| anyhow::anyhow!("Logger already initialized"))?;
+
+    Ok(())
+}
+
+/// Logs a message if it meets the configured log level.
+pub fn forge_log(level: LogLevel, msg: &str) {
+    if let Some(logger) = LOGGER.get() {
+        if level >= logger.level {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let level_str = format!("{:?}", level).to_uppercase();
+            let log_line = format!("[{}] [{}] {}\n", timestamp, level_str, msg);
+
+            // Print to stderr (LSP standard for console logs)
+            eprint!("{}", log_line);
+
+            // Write to file
+            if let Ok(mut file) = fs::OpenOptions::new().append(true).open(&logger.log_path) {
+                let _ = file.write_all(log_line.as_bytes());
+            }
+        }
+    }
 }
 
 /// Parameters for project-specific custom function definitions.
@@ -81,6 +133,8 @@ pub struct ForgeConfig {
     pub custom_functions: Option<Vec<CustomFunction>>,
     #[serde(default)]
     pub custom_functions_path: Option<String>,
+    #[serde(default)]
+    pub log_level: Option<LogLevel>,
 }
 
 /// Attempts to find and load the ForgeLSP configuration from the workspace.
@@ -93,14 +147,32 @@ pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<(ForgeCon
     for folder in workspace_folders {
         let possible_paths = [
             folder.join("forgeconfig.json"),
-            folder.join(".vscode").join("forgeconfig.json")
+            folder.join(".vscode").join("forgeconfig.json"),
         ];
 
         for path in possible_paths {
-            if !path.exists() { continue; }
+            if !path.exists() {
+                continue;
+            }
 
-            let Ok(data) = fs::read_to_string(&path) else { continue; };
-            let Ok(mut raw) = serde_json::from_str::<ForgeConfig>(&data) else { continue; };
+            crate::utils::forge_log(
+                crate::utils::LogLevel::Debug,
+                &format!("Loading config from: {}", path.display()),
+            );
+            let Ok(data) = fs::read_to_string(&path) else {
+                crate::utils::forge_log(
+                    crate::utils::LogLevel::Warn,
+                    &format!("Failed to read config at {}", path.display()),
+                );
+                continue;
+            };
+            let Ok(mut raw) = serde_json::from_str::<ForgeConfig>(&data) else {
+                crate::utils::forge_log(
+                    crate::utils::LogLevel::Error,
+                    &format!("Invalid JSON in config at {}", path.display()),
+                );
+                continue;
+            };
 
             raw.urls = raw.urls.into_iter().map(resolve_github_shorthand).collect();
             return Some((raw, path.parent().unwrap().to_path_buf()));
@@ -111,9 +183,17 @@ pub fn load_forge_config_full(workspace_folders: &[PathBuf]) -> Option<(ForgeCon
 
 /// Transforms github: shorthand into raw.githubusercontent.com URLs.
 fn resolve_github_shorthand(input: String) -> String {
-    if !input.starts_with("github:") { return input; }
+    if !input.starts_with("github:") {
+        return input;
+    }
 
-    let Some(trimmed) = input.strip_prefix("github:") else { return input; };
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Trace,
+        &format!("Resolving GitHub shorthand: {}", input),
+    );
+    let Some(trimmed) = input.strip_prefix("github:") else {
+        return input;
+    };
 
     let (path, branch) = match trimmed.split_once('#') {
         Some((p, b)) => (p, b),
@@ -121,7 +201,9 @@ fn resolve_github_shorthand(input: String) -> String {
     };
 
     let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 2 { return input; }
+    if parts.len() < 2 {
+        return input;
+    }
 
     let owner = parts[0];
     let repo = parts[1];
@@ -136,7 +218,9 @@ fn resolve_github_shorthand(input: String) -> String {
 
 /// Determines if a character at a given byte index is escaped by backslashes.
 pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
-    if byte_idx == 0 || !code.is_char_boundary(byte_idx) { return false; }
+    if byte_idx == 0 || !code.is_char_boundary(byte_idx) {
+        return false;
+    }
 
     let bytes = code.as_bytes();
     let target = bytes[byte_idx];
@@ -145,19 +229,29 @@ pub fn is_escaped(code: &str, byte_idx: usize) -> bool {
 
     while i > 0 {
         i -= 1;
-        if bytes[i] == b'\\' { count += 1; } else { break; }
+        if bytes[i] == b'\\' {
+            count += 1;
+        } else {
+            break;
+        }
     }
 
-    if target == b'`' { count == 1 } else { count == 2 }
+    if target == b'`' {
+        count == 1
+    } else {
+        count == 2
+    }
 }
 
 /// Verifies if a '[' character is the start of a ForgeScript function call.
 pub fn is_function_call_bracket(text: &str, bracket_idx: usize) -> bool {
-    if bracket_idx == 0 || text.as_bytes().get(bracket_idx) != Some(&b'[') { return false; }
+    if bracket_idx == 0 || text.as_bytes().get(bracket_idx) != Some(&b'[') {
+        return false;
+    }
 
     let mut i = bracket_idx;
     let bytes = text.as_bytes();
-    
+
     while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
         i -= 1;
     }
@@ -170,19 +264,25 @@ pub fn is_function_call_bracket(text: &str, bracket_idx: usize) -> bool {
                 let mut found = false;
                 while i > 0 {
                     i -= 1;
-                    if bytes[i] == b']' { depth += 1; }
-                    else if bytes[i] == b'[' {
+                    if bytes[i] == b']' {
+                        depth += 1;
+                    } else if bytes[i] == b'[' {
                         depth -= 1;
-                        if depth == 0 { found = true; break; }
+                        if depth == 0 {
+                            found = true;
+                            break;
+                        }
                     }
                 }
-                if !found || i == 0 || bytes[i - 1] != b'@' { return false; }
+                if !found || i == 0 || bytes[i - 1] != b'@' {
+                    return false;
+                }
                 i -= 1;
             }
             _ => break,
         }
     }
-    
+
     i > 0 && bytes[i - 1] == b'$' && !is_escaped(text, i - 1)
 }
 
@@ -192,7 +292,9 @@ pub fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
     let mut iter = code.char_indices().skip_while(|&(idx, _)| idx < open_idx);
 
     while let Some((i, c)) = iter.next() {
-        if is_escaped(code, i) { continue; }
+        if is_escaped(code, i) {
+            continue;
+        }
 
         if c == '[' {
             if i == open_idx || is_function_call_bracket(code, i) {
@@ -201,12 +303,18 @@ pub fn find_matching_bracket(code: &str, open_idx: usize) -> Option<usize> {
         } else if c == ']' {
             if depth > 0 {
                 depth -= 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
         } else if c == '$' {
             if let Some(end_idx) = find_escape_function_end(code, i) {
                 while let Some(&(idx, _)) = iter.clone().peekable().peek() {
-                    if idx <= end_idx { iter.next(); } else { break; }
+                    if idx <= end_idx {
+                        iter.next();
+                    } else {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -232,12 +340,18 @@ pub fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> 
         pos += 1;
     }
 
-    if pos == name_start { return None; }
+    if pos == name_start {
+        return None;
+    }
 
     let name = &code[name_start..pos];
-    if !is_escape_function(name) { return None; }
+    if !is_escape_function(name) {
+        return None;
+    }
 
-    if pos >= bytes.len() || bytes[pos] != b'[' { return None; }
+    if pos >= bytes.len() || bytes[pos] != b'[' {
+        return None;
+    }
 
     find_matching_bracket_raw(bytes, pos)
 }
@@ -246,10 +360,13 @@ pub fn find_escape_function_end(code: &str, dollar_idx: usize) -> Option<usize> 
 pub fn find_matching_bracket_raw(bytes: &[u8], open_idx: usize) -> Option<usize> {
     let mut depth = 0;
     for (i, &byte) in bytes.iter().enumerate().skip(open_idx) {
-        if byte == b'[' { depth += 1; }
-        else if byte == b']' {
+        if byte == b'[' {
+            depth += 1;
+        } else if byte == b']' {
             depth -= 1;
-            if depth == 0 { return Some(i); }
+            if depth == 0 {
+                return Some(i);
+            }
         }
     }
     None
@@ -261,7 +378,9 @@ pub fn offset_to_position(text: &str, offset: usize) -> Position {
     let mut col = 0u32;
 
     for (i, ch) in text.char_indices() {
-        if i >= offset { break; }
+        if i >= offset {
+            break;
+        }
         if ch == '\n' {
             line += 1;
             col = 0;
@@ -280,10 +399,14 @@ pub fn position_to_offset(text: &str, position: Position) -> Option<usize> {
         if line_num as u32 == position.line {
             let mut col = 0;
             for (i, c) in line.char_indices() {
-                if col == position.character { return Some(current_offset + i); }
+                if col == position.character {
+                    return Some(current_offset + i);
+                }
                 col += c.len_utf16() as u32;
             }
-            if col == position.character { return Some(current_offset + line.len()); }
+            if col == position.character {
+                return Some(current_offset + line.len());
+            }
             return None;
         }
         current_offset += line.len();
@@ -309,8 +432,12 @@ pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
                 if pos + 1 < bytes.len() && bytes[pos + 1] == b'[' {
                     if let Some(end_idx) = find_matching_bracket_raw(bytes, pos + 1) {
                         pos = end_idx + 1;
-                    } else { break; }
-                } else { break; }
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
             _ => break,
         }
@@ -322,15 +449,21 @@ pub fn skip_modifiers(text: &str, start_idx: usize) -> usize {
 pub fn calculate_depth(text: &str, offset: usize) -> usize {
     let mut current_depth = 0;
     let chars: Vec<(usize, char)> = text.char_indices().collect();
-    
+
     for (byte_idx, c) in chars {
-        if byte_idx >= offset { break; }
+        if byte_idx >= offset {
+            break;
+        }
 
         if !is_escaped(text, byte_idx) {
             if c == '[' {
-                if is_function_call_bracket(text, byte_idx) { current_depth += 1; }
+                if is_function_call_bracket(text, byte_idx) {
+                    current_depth += 1;
+                }
             } else if c == ']' {
-                if current_depth > 0 { current_depth -= 1; }
+                if current_depth > 0 {
+                    current_depth -= 1;
+                }
             }
         }
     }

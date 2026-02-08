@@ -23,9 +23,22 @@ use crate::utils::{load_forge_config, load_forge_config_full};
 
 /// Configures and starts the ForgeScript Language Server.
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     // Determine the root workspace folders for configuration lookup.
-    let workspace_folders = vec![std::env::current_dir().unwrap()];
+    let workspace_folders = vec![std::env::current_dir()?];
+
+    // Initialize the specialized logger for ForgeLSP.
+    let full_config = load_forge_config_full(&workspace_folders).map(|(c, _)| c);
+    let log_level = full_config
+        .as_ref()
+        .and_then(|c| c.log_level)
+        .unwrap_or(crate::utils::LogLevel::Info);
+
+    crate::utils::init_logger(workspace_folders[0].clone(), log_level)?;
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Info,
+        &format!("ForgeLSP starting up (Level: {:?})", log_level),
+    );
 
     // Resolve metadata URLs from forgeconfig.json or use the default production URL.
     let fetch_urls = load_forge_config(&workspace_folders).unwrap_or_else(|| {
@@ -36,17 +49,22 @@ async fn main() {
     });
 
     // Initialize the MetadataManager with a local cache directory and remote URLs.
-    // Arc is used for thread-safe shared ownership across async tasks.
-    let manager = Arc::new(
-        MetadataManager::new("./.cache", fetch_urls, None)
-            .expect("Failed to initialize metadata manager: check cache directory permissions"),
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Debug,
+        "Initializing MetadataManager...",
     );
+    let manager = Arc::new(MetadataManager::new("./.cache", fetch_urls, None)?);
 
     // Perform an initial fetch of all metadata sources.
-    manager
-        .load_all()
-        .await
-        .expect("Failed to load metadata sources: check internet connection or URL validity");
+    crate::utils::forge_log(crate::utils::LogLevel::Info, "Fetching metadata sources...");
+    manager.load_all().await?;
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Info,
+        &format!(
+            "Successfully indexed {} functions",
+            manager.function_count()
+        ),
+    );
 
     // Load any project-specific custom function definitions from the configuration.
     if let Some((config, _)) = load_forge_config_full(&workspace_folders)
@@ -56,11 +74,14 @@ async fn main() {
         manager
             .add_custom_functions(custom_funcs)
             .expect("Failed to add custom functions");
+        crate::utils::forge_log(
+            crate::utils::LogLevel::Info,
+            "Loaded project-specific custom functions",
+        );
     }
 
     // Wrap state in RwLocks for shared mutable access during LSP requests.
     let manager_wrapped = Arc::new(RwLock::new(manager));
-    let full_config = load_forge_config_full(&workspace_folders).map(|(c, _)| c);
     let config_wrapped = Arc::new(RwLock::new(full_config.clone()));
 
     // Instantiate the LSP service with the ForgeScriptServer state.
@@ -90,5 +111,11 @@ async fn main() {
     });
 
     // Listen for incoming LSP requests over standard IO.
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Info,
+        "ForgeLSP ready to receive requests",
+    );
     Server::new(stdin(), stdout(), socket).serve(service).await;
+    crate::utils::forge_log(crate::utils::LogLevel::Info, "ForgeLSP shutting down");
+    Ok(())
 }

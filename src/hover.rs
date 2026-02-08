@@ -1,6 +1,6 @@
 //! Implementation of the LSP Hover provider for ForgeScript.
 //!
-//! Provides context-aware tooltips for functions, including signatures, 
+//! Provides context-aware tooltips for functions, including signatures,
 //! descriptions, and documentation links.
 
 use tower_lsp::jsonrpc::Result;
@@ -8,7 +8,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::ForgeScriptServer;
-use crate::utils::{is_escaped, position_to_offset, skip_modifiers, spawn_log};
+use crate::utils::{is_escaped, position_to_offset, skip_modifiers};
 
 /// Processes a hover request by identifying the symbol under the cursor.
 pub async fn handle_hover(
@@ -16,7 +16,15 @@ pub async fn handle_hover(
     params: HoverParams,
 ) -> Result<Option<Hover>> {
     let start = std::time::Instant::now();
-
+    let uri = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .clone();
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Debug,
+        &format!("Hover request for {}", uri),
+    );
     let uri = params
         .text_document_position_params
         .text_document
@@ -33,11 +41,6 @@ pub async fn handle_hover(
         match docs.get(&uri) {
             Some(t) => t.clone(),
             _ => {
-                spawn_log(
-                    server.client.clone(),
-                    MessageType::WARNING,
-                    "[WARN] No document found in cache for hover".to_string(),
-                );
                 return Ok(None);
             }
         }
@@ -145,7 +148,7 @@ pub async fn handle_hover(
         let func_brackets = &func_ref.brackets;
 
         let mut md = String::new();
-        
+
         // Build the signature representation.
         let args_str = func_args
             .as_ref()
@@ -153,9 +156,13 @@ pub async fn handle_hover(
                 v.iter()
                     .map(|a| {
                         let mut name = String::new();
-                        if a.rest { name.push_str("..."); }
+                        if a.rest {
+                            name.push_str("...");
+                        }
                         name.push_str(&a.name);
-                        if a.required != Some(true) || a.rest { name.push('?'); }
+                        if a.required != Some(true) || a.rest {
+                            name.push('?');
+                        }
 
                         let type_str = match &a.arg_type {
                             serde_json::Value::String(s) => s.clone(),
@@ -200,7 +207,9 @@ pub async fn handle_hover(
         }
 
         // Include usage examples if provided in metadata.
-        if let Some(exs) = func_examples && !exs.is_empty() {
+        if let Some(exs) = func_examples
+            && !exs.is_empty()
+        {
             md.push_str("\n**Examples:**\n");
             for ex in exs.iter().take(2) {
                 md.push_str("\n```forgescript\n");
@@ -238,15 +247,10 @@ pub async fn handle_hover(
             md.push('\n');
         }
 
-        spawn_log(
-            server.client.clone(),
-            MessageType::LOG,
-            format!(
-                "[PERF] hover: {func_name} in {elapsed:?}",
-                elapsed = start.elapsed()
-            ),
+        crate::utils::forge_log(
+            crate::utils::LogLevel::Debug,
+            &format!("Hover resolution took {:?}", start.elapsed()),
         );
-
         return Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,

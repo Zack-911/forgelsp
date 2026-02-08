@@ -8,7 +8,7 @@ use tower_lsp::lsp_types::*;
 
 /// Maps internal parser errors to LSP-compliant diagnostics and publishes them to the client.
 ///
-/// This function converts byte offsets within the source text into line and character 
+/// This function converts byte offsets within the source text into line and character
 /// positions required by the LSP specification.
 pub async fn publish_diagnostics(
     server: &ForgeScriptServer,
@@ -16,6 +16,14 @@ pub async fn publish_diagnostics(
     text: &str,
     diagnostics_data: &[ParseDiagnostic],
 ) {
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Debug,
+        &format!(
+            "Publishing {} diagnostics for {}",
+            diagnostics_data.len(),
+            uri
+        ),
+    );
     // Map each parser-generated diagnostic to an LSP Diagnostic object.
     let diagnostics: Vec<Diagnostic> = diagnostics_data
         .iter()
