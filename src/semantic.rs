@@ -101,16 +101,27 @@ pub fn extract_highlight_ranges(
                         continue;
                     }
 
+                    // Inside extract_highlight_ranges loop...
                     if let Some((best_match_len, best_match_char_count)) =
                         try_extract_metadata_function(code, idx, &char_positions, manager)
                     {
-                        let func_name = &code[i..i + best_match_len];
+                        // Extract the raw string (e.g., "$!test")
+                        let raw_func = &code[i..i + best_match_len];
+                        
+                        // Determine the base name for consistent coloring (e.g., "$test")
+                        // We find where the actual name starts (skipping $, !, #, and @[...])
+                        let base_name = if consistent_colors {
+                            let name_start_in_match = try_find_name_start(raw_func);
+                            format!("${}", &raw_func[name_start_in_match..])
+                        } else {
+                            raw_func.to_string()
+                        };
+                    
                         let color = if consistent_colors {
                             function_to_color
-                                .entry(func_name.to_string())
+                                .entry(base_name)
                                 .or_insert_with(|| {
-                                    let c = function_colors[color_index % function_colors.len()]
-                                        .clone();
+                                    let c = function_colors[color_index % function_colors.len()].clone();
                                     color_index += 1;
                                     c
                                 })
@@ -120,7 +131,7 @@ pub fn extract_highlight_ranges(
                             color_index += 1;
                             c
                         };
-
+                    
                         highlights.push((
                             i + content_start,
                             i + best_match_len + content_start,
@@ -270,10 +281,10 @@ fn try_extract_metadata_function(
     char_positions: &[(usize, char)],
     manager: &MetadataManager,
 ) -> Option<(usize, usize)> {
-    let i = char_positions[idx].0;
+    let i = char_positions[idx].0; // The '$' position
     let mut j = idx + 1;
 
-    // Skip modifiers
+    // --- SKIP MODIFIERS ---
     while j < char_positions.len() {
         let (_, c) = char_positions[j];
         if c == '!' || c == '#' {
@@ -287,20 +298,12 @@ fn try_extract_metadata_function(
                     while j < char_positions.len() && char_positions[j].0 <= close_byte_idx {
                         j += 1;
                     }
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
+                } else { break; }
+            } else { break; }
+        } else { break; }
     }
 
-    if j >= char_positions.len() {
-        return None;
-    }
+    if j >= char_positions.len() { return None; }
 
     let name_start_byte_idx = char_positions[j].0;
     let mut name_end_char_idx = j;
@@ -312,36 +315,38 @@ fn try_extract_metadata_function(
         name_end_char_idx += 1;
     }
 
-    let has_bracket =
-        name_end_char_idx < char_positions.len() && char_positions[name_end_char_idx].1 == '[';
+    let has_bracket = name_end_char_idx < char_positions.len() && char_positions[name_end_char_idx].1 == '[';
 
-    if has_bracket {
-        let end_byte_idx = if name_end_char_idx < char_positions.len() {
-            char_positions[name_end_char_idx].0
+    // Use a helper to check the name against metadata
+    // We always prepend '$' to the base name for the lookup_key
+    let check_fn = |end_char_idx: usize| -> bool {
+        let end_byte_idx = if end_char_idx < char_positions.len() {
+            char_positions[end_char_idx].0
         } else {
             code.len()
         };
+        
+        if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
+            let lookup_key = format!("${name_part}"); // Normalizes to "$name"
+            return manager.get_exact(&lookup_key).is_some();
+        }
+        false
+    };
 
-        if let Some(full_name) = code.get(name_start_byte_idx..end_byte_idx) {
-            let lookup_key = format!("${full_name}");
-            if manager.get_exact(&lookup_key).is_some() {
-                return Some((end_byte_idx - i, name_end_char_idx - idx));
-            }
+    if has_bracket {
+        if check_fn(name_end_char_idx) {
+            return Some((char_positions[name_end_char_idx].0 - i, name_end_char_idx - idx));
         }
     } else {
         let mut check_idx = name_end_char_idx;
         while check_idx > j {
-            let end_byte_idx = if check_idx < char_positions.len() {
-                char_positions[check_idx].0
-            } else {
-                code.len()
-            };
-
-            if let Some(name_part) = code.get(name_start_byte_idx..end_byte_idx) {
-                let lookup_key = format!("${name_part}");
-                if manager.get_exact(&lookup_key).is_some() {
-                    return Some((end_byte_idx - i, check_idx - idx));
-                }
+            if check_fn(check_idx) {
+                let end_byte_idx = if check_idx < char_positions.len() {
+                    char_positions[check_idx].0
+                } else {
+                    code.len()
+                };
+                return Some((end_byte_idx - i, check_idx - idx));
             }
             check_idx -= 1;
         }
@@ -448,4 +453,26 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
     }
 
     tokens
+}
+
+fn try_find_name_start(raw_func: &str) -> usize {
+    let chars: Vec<(usize, char)> = raw_func.char_indices().collect();
+    if chars.is_empty() { return 0; }
+    
+    let mut j = 1; // Skip the initial '$'
+    while j < chars.len() {
+        let (_, c) = chars[j];
+        if c == '!' || c == '#' {
+            j += 1;
+        } else if c == '@' && j + 1 < chars.len() && chars[j+1].1 == '[' {
+            // Find closing bracket
+            if let Some(close_idx) = find_matching_bracket_raw(raw_func.as_bytes(), chars[j+1].0) {
+                while j < chars.len() && chars[j].0 <= close_idx {
+                    j += 1;
+                }
+            } else { break; }
+        } else { break; }
+    }
+    
+    if j < chars.len() { chars[j].0 } else { raw_func.len() }
 }
