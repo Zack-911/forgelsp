@@ -1142,6 +1142,7 @@ fn validate_arg_enums(
         } else {
             continue;
         };
+
         let vals = if let Some(en) = &arg.enum_name {
             mgr.enums.read().ok().and_then(|e| e.get(en).cloned())
         } else {
@@ -1157,6 +1158,11 @@ fn validate_arg_enums(
                     text.push_str(t);
                 }
             }
+
+            if !arg.required.unwrap_or(false) && text.is_empty() {
+                continue;
+            }
+
             if !v.contains(&text) {
                 diags.push(Diagnostic {
                     message: format!(
