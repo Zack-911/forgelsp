@@ -483,35 +483,35 @@ impl MetadataManager {
             "Refreshing all metadata sources...",
         );
         let start = std::time::Instant::now();
-        let all_funcs_map = self.fetcher.fetch_all(&self.fetch_urls).await?;
+        let mut all_funcs_map = self.fetcher.fetch_all(&self.fetch_urls).await?;
 
         {
             let mut trie = self
                 .trie
                 .write()
                 .expect("MetadataManager: trie lock poisoned");
-            for (url, mut funcs) in all_funcs_map {
-                let extension = if url.contains("githubusercontent.com") {
-                    url.split('/').nth(4).map(|s| s.to_string())
-                } else {
-                    None
-                };
+            for url in &self.fetch_urls {
+                if let Some(funcs) = all_funcs_map.get_mut(url) {
+                    let extension = if url.contains("githubusercontent.com") {
+                        url.split('/').nth(4).map(|s| s.to_string())
+                    } else {
+                        None
+                    };
 
-                for func in &mut funcs {
-                    func.extension = extension.clone();
-                    func.source_url = Some(url.clone());
-                }
+                    for func in funcs {
+                        func.extension = extension.clone();
+                        func.source_url = Some(url.clone());
 
-                for func in funcs {
-                    if let Some(aliases) = &func.aliases {
-                        for alias in aliases {
-                            let mut alias_func = func.clone();
-                            alias_func.name = alias.clone();
-                            trie.insert(alias, Arc::new(alias_func));
+                        if let Some(aliases) = &func.aliases {
+                            for alias in aliases {
+                                let mut alias_func = func.clone();
+                                alias_func.name = alias.clone();
+                                trie.insert(alias, Arc::new(alias_func));
+                            }
                         }
+                        let name = func.name.clone();
+                        trie.insert(&name, Arc::new(func.clone()));
                     }
-                    let name = func.name.clone();
-                    trie.insert(&name, Arc::new(func));
                 }
             }
         }
