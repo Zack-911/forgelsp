@@ -97,13 +97,21 @@ jobs:
       - name: Build WASM
         run: wasm-pack build --target web --release
 
+      - name: Verify Build
+        run: |
+          echo "Checking pkg directory..."
+          ls -la pkg/
+
       - name: Deploy Wasm to forgelsp-wasm branch
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: pkg
           branch: forgelsp-wasm
-          token: ${{ secrets.TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          single-commit: true
           clean: true
+          # Adding this to ensure the action doesn't exit early
+          commit-message: "Force deploy Wasm build ${{ github.sha }}"
 
   release:
     name: Create or Update GitHub Release
