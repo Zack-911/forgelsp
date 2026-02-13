@@ -1,14 +1,22 @@
+#[cfg(not(target_arch = "wasm32"))]
 use crate::server::ForgeScriptServer;
-use crate::utils::{LogLevel, forge_log, position_to_offset};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::{LogLevel, forge_log};
+use crate::utils::{
+    compute_active_param_index, find_active_function_call, get_text_up_to_cursor,
+    position_to_offset,
+};
+use lsp_types::*;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn handle_completion(
     server: &ForgeScriptServer,
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
-    let start = std::time::Instant::now();
+    let start = crate::utils::Instant::now();
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
 
@@ -32,10 +40,23 @@ pub async fn handle_completion(
         .expect("Server: lock poisoned")
         .clone();
 
-    let text_up_to_cursor = server.get_text_up_to_cursor(&text, position);
-    if let Some((func_name, open_idx)) = server.find_active_function_call(&text_up_to_cursor) {
-        let param_idx =
-            server.compute_active_param_index(&text_up_to_cursor[open_idx + 1..]) as usize;
+    let res = get_completions(&text, position, &mgr);
+
+    forge_log(
+        LogLevel::Debug,
+        &format!("Completion response built in {}", start.elapsed_display()),
+    );
+    Ok(res)
+}
+
+pub fn get_completions(
+    text: &str,
+    position: Position,
+    mgr: &crate::metadata::MetadataManager,
+) -> Option<CompletionResponse> {
+    let text_up_to_cursor = get_text_up_to_cursor(text, position);
+    if let Some((func_name, open_idx)) = find_active_function_call(&text_up_to_cursor) {
+        let param_idx = compute_active_param_index(&text_up_to_cursor[open_idx + 1..]) as usize;
         if let Some(func) = mgr.get(&format!("${func_name}"))
             && let Some(args) = &func.args
         {
@@ -66,7 +87,10 @@ pub async fn handle_completion(
                             ..Default::default()
                         })
                         .collect();
-                    return Ok(Some(CompletionResponse::Array(items)));
+                    return Some(CompletionResponse::List(CompletionList {
+                        is_incomplete: false,
+                        items,
+                    }));
                 }
             }
         }
@@ -78,7 +102,7 @@ pub async fn handle_completion(
     let before = &line[..offset];
 
     let Some(dollar_idx) = before.rfind('$') else {
-        return Ok(None);
+        return None;
     };
     let after_dollar = &before[dollar_idx + 1..];
     let modifier = if after_dollar.starts_with('!') {
@@ -98,18 +122,16 @@ pub async fn handle_completion(
     let items = mgr
         .all_functions()
         .into_iter()
-        .map(|f| build_completion_item(server, f, modifier, range))
+        .map(|f| build_completion_item(f, modifier, range))
         .collect::<Vec<_>>();
 
-    forge_log(
-        LogLevel::Debug,
-        &format!("Completion response built in {:?}", start.elapsed()),
-    );
-    Ok(Some(CompletionResponse::Array(items)))
+    Some(CompletionResponse::List(CompletionList {
+        is_incomplete: false,
+        items,
+    }))
 }
 
 pub(crate) fn build_completion_item(
-    _server: &ForgeScriptServer,
     f: Arc<crate::metadata::Function>,
     modifier: &str,
     range: Range,

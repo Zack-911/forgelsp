@@ -7,13 +7,29 @@ license = "MIT"
 repository = "https://github.com/tryforge/forgelsp"
 keywords = ["lsp", "language-server", "forgescript", "discord", "bot"]
 categories = ["development-tools", "parser-implementations"]
-authors = ["ForgeScript Team"]
 
 [[bin]]
 name = "forgevsc"
 path = "src/main.rs"
 
+[lib]
+name = "forgevsc"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3.31"
+base64 = "0.22.1"
+nom = "8.0.0"
+smallvec = { version = "1.15.1", features = ["serde"] }
+regex = "1.12.2"
+lsp-types = "0.94.1"
+url = { version = "2.5", features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = [
   "macros",
   "rt-multi-thread",
@@ -24,16 +40,15 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-futures = "0.3.31"
-base64 = "0.22.1"
-nom = "8.0.0"
-smallvec = "1.15.1"
-regex = "1.12.2"
 tower-lsp = "0.20.0"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Performance", "Window"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
@@ -44,3 +59,6 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

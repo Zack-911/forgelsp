@@ -9,6 +9,7 @@ use crate::utils::{
     find_escape_function_end, find_matching_bracket, find_matching_bracket_raw, is_escape_function,
     is_escaped,
 };
+use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ use std::sync::Arc;
 const ENUM_VALIDATION_EXCEPTIONS: &[(&str, usize); 1] = &[("color", 0)];
 
 /// Captures syntax errors or warnings during the parsing phase.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub message: String,
     pub start: usize,
@@ -24,7 +25,7 @@ pub struct Diagnostic {
 }
 
 /// Token types recognized by the ForgeScript scanner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenKind {
     Text,
     FunctionName,
@@ -34,7 +35,7 @@ pub enum TokenKind {
 }
 
 /// A scanned fragment of source code with corresponding metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Token {
     pub kind: TokenKind,
     pub text: String,
@@ -43,7 +44,7 @@ pub struct Token {
 }
 
 /// A successfully identified ForgeScript function call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedFunction {
     pub name: String,
     #[allow(dead_code)]
@@ -80,7 +81,7 @@ impl ParsedFunction {
 }
 
 /// Result of a complete parsing pass.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseResult {
     pub tokens: Vec<Token>,
     pub diagnostics: Vec<Diagnostic>,
@@ -88,7 +89,7 @@ pub struct ParseResult {
 }
 
 /// Represent an individual argument, which can be a literal or a nested function.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ParsedArg {
     Literal { text: String },
     Function { func: Box<ParsedFunction> },

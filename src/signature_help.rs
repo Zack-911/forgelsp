@@ -1,4 +1,5 @@
 use crate::server::ForgeScriptServer;
+use crate::utils::{compute_active_param_index, find_active_function_call, get_text_up_to_cursor};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -18,11 +19,11 @@ pub async fn handle_signature_help(
             "Document not found",
         ))?;
 
-    let text_up_to_cursor = server.get_text_up_to_cursor(&text, pos);
-    let Some((func_name, open_idx)) = server.find_active_function_call(&text_up_to_cursor) else {
+    let text_up_to_cursor = get_text_up_to_cursor(&text, pos);
+    let Some((func_name, open_idx)) = find_active_function_call(&text_up_to_cursor) else {
         return Ok(None);
     };
-    let param_idx = server.compute_active_param_index(&text_up_to_cursor[open_idx + 1..]);
+    let param_idx = compute_active_param_index(&text_up_to_cursor[open_idx + 1..]);
 
     let mgr = server
         .manager

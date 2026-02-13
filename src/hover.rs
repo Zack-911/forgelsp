@@ -15,7 +15,7 @@ pub async fn handle_hover(
     server: &ForgeScriptServer,
     params: HoverParams,
 ) -> Result<Option<Hover>> {
-    let start = std::time::Instant::now();
+    let start = crate::utils::Instant::now();
     let uri = params
         .text_document_position_params
         .text_document
@@ -249,7 +249,7 @@ pub async fn handle_hover(
 
         crate::utils::forge_log(
             crate::utils::LogLevel::Debug,
-            &format!("Hover resolution took {:?}", start.elapsed()),
+            &format!("Hover resolution took {}", start.elapsed_display()),
         );
         return Ok(Some(Hover {
             contents: HoverContents::Markup(MarkupContent {

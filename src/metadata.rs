@@ -4,7 +4,11 @@
 //! MetadataManager that handles remote fetches from GitHub or local configuration.
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(target_arch = "wasm32")]
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -14,7 +18,9 @@ use reqwest::Client;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Client as LspClient;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::lsp_types::{MessageActionItem, MessageType};
 
 use crate::utils::Event;
@@ -109,12 +115,15 @@ pub struct Arg {
 #[derive(Clone, Debug)]
 pub struct Fetcher {
     http: Client,
+    #[cfg(not(target_arch = "wasm32"))]
     cache_dir: PathBuf,
+    #[cfg(not(target_arch = "wasm32"))]
     client: Option<LspClient>,
 }
 
 impl Fetcher {
     /// Initializes a Fetcher with a dedicated cache directory and optional LSP client for error reporting.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(cache_dir: impl Into<PathBuf>, client: Option<LspClient>) -> Self {
         let dir = cache_dir.into();
         if !dir.exists() {
@@ -129,7 +138,18 @@ impl Fetcher {
         }
     }
 
+    /// Initializes a Fetcher for WASM (no disk cache, no LSP client).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_wasm() -> Self {
+        Self {
+            http: Client::builder()
+                .build()
+                .expect("Failed to build HTTP client"),
+        }
+    }
+
     /// Maps a URL to a stable cache filename based on the repository and type.
+    #[cfg(not(target_arch = "wasm32"))]
     fn cache_path(&self, url: &str) -> PathBuf {
         let parts: Vec<&str> = url.split('/').collect();
 
@@ -172,6 +192,7 @@ impl Fetcher {
     }
 
     /// Reads deserialized data from the local cache if it exists.
+    #[cfg(not(target_arch = "wasm32"))]
     fn get_from_cache<T: DeserializeOwned>(&self, path: &Path) -> Option<T> {
         fs::read_to_string(path)
             .ok()
@@ -179,6 +200,7 @@ impl Fetcher {
     }
 
     /// Fetches JSON from a URL and updates the local cache, falling back to cache on failure.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn fetch_or_cache<T: DeserializeOwned + Serialize>(
         &self,
         url: &str,
@@ -228,7 +250,24 @@ impl Fetcher {
         }
     }
 
+    /// Fetches JSON from a URL (WASM: no disk cache, no retry dialog).
+    #[cfg(target_arch = "wasm32")]
+    pub async fn fetch_or_cache<T: DeserializeOwned + Serialize>(
+        &self,
+        url: &str,
+        _mandatory: bool,
+    ) -> Result<T> {
+        let resp = self.http.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Status {}: {}", resp.status(), url));
+        }
+        let body = resp.text().await?;
+        let parsed: T = serde_json::from_str(&body)?;
+        Ok(parsed)
+    }
+
     /// Displays an error message to the user via the LSP client with a retry option.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn show_error_report(&self, url: &str, reason: &str) -> bool {
         if let Some(client) = &self.client {
             let message = format!("Metadata fetch failed for {url}: {reason}");
@@ -270,11 +309,13 @@ impl Fetcher {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         self.cleanup_unused_cache(urls).ok();
         Ok(out)
     }
 
     /// Deletes cache files that are no longer referenced in the current configuration.
+    #[cfg(not(target_arch = "wasm32"))]
     fn cleanup_unused_cache(&self, active_urls: &[String]) -> Result<()> {
         if !self.cache_dir.exists() {
             return Ok(());
@@ -456,11 +497,13 @@ pub struct MetadataManager {
     trie: Arc<RwLock<FunctionTrie>>,
     pub enums: Arc<RwLock<HashMap<String, Vec<String>>>>,
     pub events: Arc<RwLock<Vec<Event>>>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub file_map: Arc<RwLock<HashMap<PathBuf, Vec<String>>>>,
 }
 
 impl MetadataManager {
-    /// Creates a MetadataManager with caching enabled.
+    /// Creates a MetadataManager with caching enabled (native).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(
         cache_dir: impl Into<PathBuf>,
         fetch_urls: Vec<String>,
@@ -476,13 +519,25 @@ impl MetadataManager {
         })
     }
 
+    /// Creates a MetadataManager for WASM (no disk cache).
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_wasm(fetch_urls: Vec<String>) -> Result<Self> {
+        Ok(Self {
+            fetcher: Fetcher::new_wasm(),
+            fetch_urls,
+            trie: Arc::new(RwLock::new(FunctionTrie::default())),
+            enums: Arc::new(RwLock::new(HashMap::new())),
+            events: Arc::new(RwLock::new(Vec::new())),
+        })
+    }
+
     /// Triggers a refresh of all metadata from the configured source URLs.
     pub async fn load_all(&self) -> Result<()> {
         crate::utils::forge_log(
             crate::utils::LogLevel::Info,
             "Refreshing all metadata sources...",
         );
-        let start = std::time::Instant::now();
+        let start = crate::utils::Instant::now();
         let mut all_funcs_map = self.fetcher.fetch_all(&self.fetch_urls).await?;
 
         {
@@ -538,12 +593,13 @@ impl MetadataManager {
 
         crate::utils::forge_log(
             crate::utils::LogLevel::Info,
-            &format!("Metadata refresh complete in {:?}", start.elapsed()),
+            &format!("Metadata refresh complete in {}", start.elapsed_display()),
         );
         Ok(())
     }
 
     /// Ingests custom functions from inline configuration or file paths.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_custom_functions_from_config(
         &self,
         config: &crate::utils::ForgeConfig,
@@ -564,6 +620,7 @@ impl MetadataManager {
     }
 
     /// Recursively scans a directory for custom function definitions in JS/TS files.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_custom_functions_from_folder(
         &self,
         path: PathBuf,
@@ -577,6 +634,7 @@ impl MetadataManager {
         Ok((files_found, custom_funcs.len()))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn scan_recursive(
         &self,
         path: &Path,
@@ -606,6 +664,7 @@ impl MetadataManager {
     }
 
     /// Unregisters all functions associated with a specific file path.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn remove_functions_at_path(&self, path: &Path) {
         if let Some(names) = self
             .file_map
@@ -621,6 +680,7 @@ impl MetadataManager {
     }
 
     /// Forces a reload of custom functions from a modified file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn reload_file(&self, path: PathBuf) -> Result<usize> {
         if !path.exists() || !path.is_file() {
             self.remove_functions_at_path(&path);
@@ -640,6 +700,7 @@ impl MetadataManager {
     }
 
     /// Parses function headers and metadata from JS/TS source code using regular expressions.
+    #[cfg(not(target_arch = "wasm32"))]
     fn parse_custom_functions_from_js(
         &self,
         content: &str,

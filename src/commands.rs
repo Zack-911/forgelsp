@@ -2,6 +2,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::server::{CursorMovedParams, ForgeScriptServer, TriggerCompletionNotification};
+use crate::utils::{compute_active_param_index, find_active_function_call, get_text_up_to_cursor};
 
 pub async fn handle_execute_command(
     server: &ForgeScriptServer,
@@ -21,9 +22,9 @@ pub async fn handle_execute_command(
             let should_trigger = (|| {
                 let docs = server.documents.read().expect("Server: lock poisoned");
                 let text = docs.get(&moved.uri)?;
-                let up_to_cursor = server.get_text_up_to_cursor(text, moved.position);
-                let (name, open) = server.find_active_function_call(&up_to_cursor)?;
-                let idx = server.compute_active_param_index(&up_to_cursor[open + 1..]) as usize;
+                let up_to_cursor = get_text_up_to_cursor(text, moved.position);
+                let (name, open) = find_active_function_call(&up_to_cursor)?;
+                let idx = compute_active_param_index(&up_to_cursor[open + 1..]) as usize;
                 let mgr = server
                     .manager
                     .read()

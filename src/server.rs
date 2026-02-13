@@ -5,44 +5,54 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, RwLock};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::diagnostics::publish_diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::hover::handle_hover;
 use crate::metadata::MetadataManager;
 use crate::parser::{ForgeScriptParser, ParseResult};
-use crate::utils::{ForgeConfig, load_forge_config_full};
-use regex::Regex;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::ForgeConfig;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::utils::load_forge_config_full;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::Client;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::LanguageServer;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::async_trait;
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::jsonrpc::Result;
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::wildcard_imports)]
 use tower_lsp::lsp_types::*;
 
-/// Regex for identifying '$' followed by alphanumeric characters at the end of a string.
-pub(crate) static SIGNATURE_FUNC_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)\s*$").expect("Server: regex failure"));
-
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HighlightRange {
     pub range: Range,
     pub color: String,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ForgeHighlightsParams {
     pub uri: Url,
     pub highlights: Vec<HighlightRange>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ForgeDepthParams {
     pub uri: Url,
     pub depth: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CursorMovedParams {
     pub uri: Url,
@@ -50,6 +60,7 @@ pub struct CursorMovedParams {
 }
 
 /// The core ForgeScript language server state.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub struct ForgeScriptServer {
     pub client: Client,
@@ -64,10 +75,11 @@ pub struct ForgeScriptServer {
     pub cursor_positions: Arc<RwLock<HashMap<Url, Position>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ForgeScriptServer {
     /// Parses the updated text, updates the cache, and triggers diagnostic/highlight updates.
     pub async fn process_text(&self, uri: Url, text: String) {
-        let start = std::time::Instant::now();
+        let start = crate::utils::Instant::now();
         crate::utils::forge_log(
             crate::utils::LogLevel::Debug,
             &format!("Processing text for {}", uri),
@@ -87,7 +99,7 @@ impl ForgeScriptServer {
 
         crate::utils::forge_log(
             crate::utils::LogLevel::Debug,
-            &format!("Finished processing {} in {:?}", uri, start.elapsed()),
+            &format!("Finished processing {} in {}", uri, start.elapsed_display()),
         );
     }
 
@@ -98,114 +110,33 @@ impl ForgeScriptServer {
             .expect("Server: lock poisoned")
             .function_count()
     }
-    pub(crate) fn get_text_up_to_cursor(&self, text: &str, position: Position) -> String {
-        let mut text_up_to_cursor =
-            if let Some(offset) = crate::utils::position_to_offset(text, position) {
-                text[..offset].to_string()
-            } else {
-                text.to_string()
-            };
-
-        if text_up_to_cursor.len() > 8 * 1024 {
-            let len = text_up_to_cursor.len();
-            text_up_to_cursor = text_up_to_cursor[len - 8 * 1024..].to_string();
-        }
-        text_up_to_cursor
-    }
-
-    pub(crate) fn find_active_function_call(
-        &self,
-        text_up_to_cursor: &str,
-    ) -> Option<(String, usize)> {
-        let mut depth = 0i32;
-        let mut last_open_index: Option<usize> = None;
-
-        for (idx, ch) in text_up_to_cursor.char_indices().rev() {
-            match ch {
-                ']' => depth += 1,
-                '[' => {
-                    if depth == 0 {
-                        last_open_index = Some(idx);
-                        break;
-                    }
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-
-        let open_index = last_open_index?;
-        let before_bracket = &text_up_to_cursor[..open_index];
-        let caps = SIGNATURE_FUNC_RE.captures(before_bracket)?;
-        let func_name = caps.get(1)?.as_str().to_string();
-        Some((func_name, open_index))
-    }
-
-    pub(crate) fn compute_active_param_index(&self, text_after_bracket: &str) -> u32 {
-        let mut param_index: u32 = 0;
-        let mut local_depth: i32 = 0;
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut prev_escape = false;
-
-        for ch in text_after_bracket.chars() {
-            if prev_escape {
-                prev_escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                prev_escape = true;
-                continue;
-            }
-            if ch == '\'' && !in_double {
-                in_single = !in_single;
-                continue;
-            }
-            if ch == '"' && !in_single {
-                in_double = !in_double;
-                continue;
-            }
-            if in_single || in_double {
-                continue;
-            }
-
-            match ch {
-                '[' => local_depth += 1,
-                ']' => {
-                    if local_depth > 0 {
-                        local_depth -= 1;
-                    } else {
-                        break;
-                    }
-                }
-                ',' | ';' if local_depth == 0 => {
-                    param_index = param_index.saturating_add(1);
-                }
-                _ => {}
-            }
-        }
-        param_index
-    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct CustomNotification;
+#[cfg(not(target_arch = "wasm32"))]
 impl tower_lsp::lsp_types::notification::Notification for CustomNotification {
     type Params = ForgeHighlightsParams;
     const METHOD: &'static str = "forge/highlights";
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct DepthNotification;
+#[cfg(not(target_arch = "wasm32"))]
 impl tower_lsp::lsp_types::notification::Notification for DepthNotification {
     type Params = ForgeDepthParams;
     const METHOD: &'static str = "forge/updateDepth";
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct TriggerCompletionNotification;
+#[cfg(not(target_arch = "wasm32"))]
 impl tower_lsp::lsp_types::notification::Notification for TriggerCompletionNotification {
     type Params = Url;
     const METHOD: &'static str = "forge/triggerCompletion";
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn build_capabilities() -> ServerCapabilities {
     ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
@@ -268,6 +199,7 @@ fn build_capabilities() -> ServerCapabilities {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl LanguageServer for ForgeScriptServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {

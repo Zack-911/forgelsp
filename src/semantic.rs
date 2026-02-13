@@ -4,14 +4,14 @@
 //! ForgeScript identifiers from text.
 
 use crate::metadata::MetadataManager;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::server::{CustomNotification, ForgeHighlightsParams, ForgeScriptServer, HighlightRange};
-use crate::utils::{
-    LogLevel, find_matching_bracket_raw, forge_log, is_escaped, offset_to_position,
-};
+use crate::utils::{find_matching_bracket_raw, is_escaped, offset_to_position};
+use lsp_types::*;
 use regex::Regex;
 use std::sync::{Arc, LazyLock};
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
 
 /// Identifies ForgeScript code blocks in host configuration files.
 static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -24,7 +24,7 @@ pub fn extract_semantic_tokens_with_colors(
     use_function_colors: bool,
     manager: &Arc<MetadataManager>,
 ) -> Vec<SemanticToken> {
-    let start = std::time::Instant::now();
+    let start = crate::utils::Instant::now();
     let mut tokens = Vec::new();
 
     // Iterate through all "code:" blocks found in the source.
@@ -41,7 +41,7 @@ pub fn extract_semantic_tokens_with_colors(
 
     crate::utils::forge_log(
         crate::utils::LogLevel::Debug,
-        &format!("Extracted semantic tokens in {:?}", start.elapsed()),
+        &format!("Extracted semantic tokens in {}", start.elapsed_display()),
     );
     // Convert absolute token offsets to relative offsets for the LSP payload.
     to_relative_tokens(&tokens, source)
@@ -330,8 +330,8 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
         let end_pos = offset_to_position(source, end);
 
         if start_pos.line == end_pos.line {
-            let delta_line = start_pos.line.saturating_sub(last_line);
-            let delta_start = if delta_line == 0 {
+            let delta_line: u32 = start_pos.line.saturating_sub(last_line);
+            let delta_start: u32 = if delta_line == 0 {
                 start_pos.character.saturating_sub(last_col)
             } else {
                 start_pos.character
@@ -347,8 +347,8 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
             last_col = start_pos.character;
         } else {
             let lines: Vec<&str> = source.lines().collect();
-            for line_idx in start_pos.line..=end_pos.line {
-                let delta_line = line_idx.saturating_sub(last_line);
+            for line_idx in (start_pos.line as u32)..=(end_pos.line as u32) {
+                let delta_line: u32 = line_idx.saturating_sub(last_line);
                 let line_text = lines.get(line_idx as usize).unwrap_or(&"");
                 let (start_char, length) = if line_idx == start_pos.line {
                     (
@@ -362,7 +362,7 @@ fn to_relative_tokens(found: &[(usize, usize, u32)], source: &str) -> Vec<Semant
                 };
 
                 if length > 0 {
-                    let delta_start = if delta_line == 0 {
+                    let delta_start: u32 = if delta_line == 0 {
                         start_char.saturating_sub(last_col)
                     } else {
                         start_char
@@ -413,6 +413,7 @@ fn try_find_name_start(raw_func: &str) -> usize {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn handle_semantic_tokens_full(
     server: &ForgeScriptServer,
     params: SemanticTokensParams,
@@ -441,8 +442,9 @@ pub async fn handle_semantic_tokens_full(
         data: tokens,
     })))
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn handle_send_highlights(server: &ForgeScriptServer, uri: Url, text: &str) {
-    let start = std::time::Instant::now();
+    let start = crate::utils::Instant::now();
     let highlights = {
         let colors = server
             .function_colors
@@ -482,8 +484,8 @@ pub async fn handle_send_highlights(server: &ForgeScriptServer, uri: Url, text: 
             highlights,
         })
         .await;
-    forge_log(
-        LogLevel::Debug,
-        &format!("Highlights sent for {} in {:?}", uri, start.elapsed()),
+    crate::utils::forge_log(
+        crate::utils::LogLevel::Debug,
+        &format!("Highlights sent for {} in {}", uri, start.elapsed_display()),
     );
 }

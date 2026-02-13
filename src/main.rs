@@ -1,33 +1,54 @@
-//! Entry point for the ForgeLSP server.
+//! Entry point for the ForgeLSP server (native only).
 //!
 //! This module initializes the MetadataManager, loads configuration from forgeconfig.json,
 //! and starts the Tower LSP server on stdin/stdout.
 
+#[cfg(not(target_arch = "wasm32"))]
 mod commands;
+#[cfg(not(target_arch = "wasm32"))]
 mod completion;
+#[cfg(not(target_arch = "wasm32"))]
 mod definition;
+#[cfg(not(target_arch = "wasm32"))]
 mod depth;
+#[cfg(not(target_arch = "wasm32"))]
 mod diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 mod folding_range;
+#[cfg(not(target_arch = "wasm32"))]
 mod hover;
+#[cfg(not(target_arch = "wasm32"))]
 mod metadata;
+#[cfg(not(target_arch = "wasm32"))]
 mod parser;
+#[cfg(not(target_arch = "wasm32"))]
 mod semantic;
+#[cfg(not(target_arch = "wasm32"))]
 mod server;
+#[cfg(not(target_arch = "wasm32"))]
 mod signature_help;
+#[cfg(not(target_arch = "wasm32"))]
 mod utils;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, RwLock};
 
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{stdin, stdout};
+#[cfg(not(target_arch = "wasm32"))]
 use tower_lsp::{LspService, Server};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::metadata::MetadataManager;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::server::ForgeScriptServer;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::utils::{load_forge_config, load_forge_config_full};
 
 /// Configures and starts the ForgeScript Language Server.
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Determine the root workspace folders for configuration lookup.
@@ -124,4 +145,9 @@ async fn main() -> anyhow::Result<()> {
     Server::new(stdin(), stdout(), socket).serve(service).await;
     crate::utils::forge_log(crate::utils::LogLevel::Info, "ForgeLSP shutting down");
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // WASM entry point — not used, use the lib exports instead.
 }
