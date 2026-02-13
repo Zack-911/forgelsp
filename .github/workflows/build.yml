@@ -78,9 +78,35 @@ jobs:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: output/*
 
+  build-wasm:
+    name: Build WASM Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        run: wasm-pack build --target web --release
+
+      - name: Deploy Wasm to forgelsp-wasm branch
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: pkg
+          branch: forgelsp-wasm
+          token: ${{ secrets.TOKEN }}
+          clean: true
+
   release:
     name: Create or Update GitHub Release
-    needs: build
+    needs: [build, build-wasm]
     runs-on: ubuntu-latest
 
     steps:
