@@ -191,11 +191,8 @@ pub async fn handle_hover(
             .unwrap_or_else(|| "void".to_string());
 
         md.push_str("```forgescript\n");
-        if let Some(true) = func_brackets {
+        if func_brackets.is_some() {
             md.push_str(&format!("{func_name}[{args_str}] -> {outputs_str}\n"));
-        } else if let Some(false) = func_brackets {
-            md.push_str(&format!("{func_name}[{args_str}] -> {outputs_str}\n"));
-            md.push_str("Note: brackets are optional.\n");
         } else {
             md.push_str(&format!("{func_name} -> {outputs_str}\n"));
         }
