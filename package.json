@@ -1,0 +1,28 @@
+{
+  "name": "forgevsc",
+  "type": "module",
+  "description": "Language Server Protocol (LSP) implementation for ForgeScript, providing intelligent code completion, diagnostics, and semantic highlighting",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tryforge/forgelsp"
+  },
+  "files": [
+    "forgevsc_bg.wasm",
+    "forgevsc.js",
+    "forgevsc.d.ts"
+  ],
+  "main": "forgevsc.js",
+  "types": "forgevsc.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "lsp",
+    "language-server",
+    "forgescript",
+    "discord",
+    "bot"
+  ]
+}
