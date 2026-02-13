@@ -3,7 +3,9 @@ name: Build & Release
 on:
   push:
     branches:
-      - "*"
+      - "master"
+    branches-ignore:
+      - "forgelsp-wasm"
 
 jobs:
   build:
