@@ -97,10 +97,13 @@ jobs:
       - name: Build WASM
         run: wasm-pack build --target web --release
 
-      - name: Verify Build
+      - name: Verify Build and Remove Wasm-Pack Ignore
         run: |
           echo "Checking pkg directory..."
           ls -la pkg/
+          # This is the fix:
+          rm pkg/.gitignore
+          echo ".gitignore removed from pkg/ folder"
 
       - name: Deploy Wasm to forgelsp-wasm branch
         uses: JamesIves/github-pages-deploy-action@v4
@@ -109,9 +112,6 @@ jobs:
           branch: forgelsp-wasm
           token: ${{ secrets.GITHUB_TOKEN }}
           single-commit: true
-          clean: true
-          # Adding this to ensure the action doesn't exit early
-          commit-message: "Force deploy Wasm build ${{ github.sha }}"
 
   release:
     name: Create or Update GitHub Release
